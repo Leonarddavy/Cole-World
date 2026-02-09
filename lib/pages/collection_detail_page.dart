@@ -4,6 +4,8 @@ import '../models/collection_models.dart';
 import '../models/entry_menu_action.dart';
 import '../ui/collection_type_ui.dart';
 import '../widgets/artwork_card.dart';
+import '../widgets/graffiti_scaffold.dart';
+import '../widgets/graffiti_tag.dart';
 import '../widgets/staggered_song_tile.dart';
 
 class CollectionDetailPage extends StatefulWidget {
@@ -14,6 +16,7 @@ class CollectionDetailPage extends StatefulWidget {
     required this.isPlaying,
     required this.onPlayTrack,
     required this.onReorderTracks,
+    required this.onDeleteTrack,
     required this.onMenuAction,
     required this.resolveEntry,
   });
@@ -24,6 +27,7 @@ class CollectionDetailPage extends StatefulWidget {
   final Future<void> Function(Track track) onPlayTrack;
   final Future<void> Function(String entryId, int oldIndex, int newIndex)
   onReorderTracks;
+  final Future<void> Function(String entryId, Track track) onDeleteTrack;
   final Future<void> Function(CollectionEntry entry, EntryMenuAction action)
   onMenuAction;
   final CollectionEntry? Function(String id) resolveEntry;
@@ -35,6 +39,61 @@ class CollectionDetailPage extends StatefulWidget {
 class _CollectionDetailPageState extends State<CollectionDetailPage> {
   late CollectionEntry _entry =
       widget.resolveEntry(widget.entry.id) ?? widget.entry;
+
+  Widget _buildHero(BuildContext context) {
+    final theme = Theme.of(context);
+    final trackCount = _entry.tracks.length;
+
+    return Stack(
+      children: [
+        SizedBox(
+          height: 320,
+          child: ArtworkCard(
+            entry: _entry,
+            borderRadius: BorderRadius.circular(26),
+            heroTag: 'cover_${_entry.id}',
+          ),
+        ),
+        Positioned.fill(
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(26),
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [
+                  Colors.transparent,
+                  const Color(0xFF0C0A09).withValues(alpha: 0.9),
+                ],
+                stops: const [0.45, 1.0],
+              ),
+            ),
+          ),
+        ),
+        Positioned(
+          left: 16,
+          bottom: 16,
+          right: 16,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              GraffitiTag(label: _entry.type.label),
+              const SizedBox(height: 10),
+              Text(
+                _entry.title,
+                style: theme.textTheme.headlineLarge,
+              ),
+              const SizedBox(height: 4),
+              Text(
+                '$trackCount ${trackCount == 1 ? 'song' : 'songs'}',
+                style: theme.textTheme.bodySmall,
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
 
   Future<void> _refreshFromSource() async {
     final fresh = widget.resolveEntry(_entry.id);
@@ -53,42 +112,50 @@ class _CollectionDetailPageState extends State<CollectionDetailPage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    return GraffitiScaffold(
       appBar: AppBar(
-        title: Text(_entry.title),
+        title: Text(
+          _entry.title,
+          style: Theme.of(context).textTheme.headlineSmall,
+        ),
         actions: [
-          if (_entry.type.supportsMenuEdit)
-            PopupMenuButton<EntryMenuAction>(
-              icon: const Icon(Icons.menu_rounded),
-              onSelected: _handleMenu,
-              itemBuilder: (context) => const [
-                PopupMenuItem(
-                  value: EntryMenuAction.uploadSongs,
-                  child: Text('Upload Songs'),
+          PopupMenuButton<EntryMenuAction>(
+            icon: const Icon(Icons.menu_rounded),
+            onSelected: _handleMenu,
+            itemBuilder: (context) {
+              final items = <PopupMenuEntry<EntryMenuAction>>[];
+              if (_entry.type.supportsMenuEdit) {
+                items.addAll(const [
+                  PopupMenuItem(
+                    value: EntryMenuAction.uploadSongs,
+                    child: Text('Upload Songs'),
+                  ),
+                  PopupMenuItem(
+                    value: EntryMenuAction.editThumbnail,
+                    child: Text('Edit Thumbnail'),
+                  ),
+                  PopupMenuDivider(),
+                ]);
+              }
+              items.add(
+                const PopupMenuItem(
+                  value: EntryMenuAction.deleteCollection,
+                  child: Text('Delete Collection'),
                 ),
-                PopupMenuItem(
-                  value: EntryMenuAction.editThumbnail,
-                  child: Text('Edit Thumbnail'),
-                ),
-              ],
-            ),
+              );
+              return items;
+            },
+          ),
         ],
       ),
       body: ListView(
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 28),
         children: [
-          SizedBox(
-            height: 300,
-            child: ArtworkCard(
-              entry: _entry,
-              borderRadius: BorderRadius.circular(22),
-              heroTag: 'cover_${_entry.id}',
-            ),
-          ),
-          const SizedBox(height: 14),
+          _buildHero(context),
+          const SizedBox(height: 18),
           Text(
-            _entry.type.label,
-            style: Theme.of(context).textTheme.labelLarge,
+            'Story',
+            style: Theme.of(context).textTheme.titleMedium,
           ),
           const SizedBox(height: 6),
           Text(
@@ -128,8 +195,22 @@ class _CollectionDetailPageState extends State<CollectionDetailPage> {
               },
               itemBuilder: (context, index) {
                 final track = _entry.tracks[index];
-                return Card(
+                final isActive =
+                    widget.currentTrackId == track.id && widget.isPlaying;
+                return Container(
                   key: ValueKey(track.id),
+                  margin: const EdgeInsets.only(bottom: 8),
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(16),
+                    gradient: const LinearGradient(
+                      colors: [Color(0xFF201812), Color(0xFF17110D)],
+                    ),
+                    border: Border.all(
+                      color: isActive
+                          ? const Color(0xFFFFB547)
+                          : Colors.white12,
+                    ),
+                  ),
                   child: ListTile(
                     leading: const Icon(Icons.music_note),
                     title: Text(track.title),
@@ -138,9 +219,14 @@ class _CollectionDetailPageState extends State<CollectionDetailPage> {
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Icon(
-                          widget.currentTrackId == track.id && widget.isPlaying
+                          isActive
                               ? Icons.pause_circle_filled
                               : Icons.play_circle_fill,
+                        ),
+                        IconButton(
+                          tooltip: 'Delete song',
+                          onPressed: () => widget.onDeleteTrack(_entry.id, track),
+                          icon: const Icon(Icons.delete_outline),
                         ),
                         ReorderableDragStartListener(
                           index: index,
@@ -165,6 +251,25 @@ class _CollectionDetailPageState extends State<CollectionDetailPage> {
                 showPlaying:
                     widget.currentTrackId == _entry.tracks[i].id &&
                     widget.isPlaying,
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      widget.currentTrackId == _entry.tracks[i].id &&
+                              widget.isPlaying
+                          ? Icons.pause_circle_filled
+                          : Icons.play_circle_fill,
+                    ),
+                    IconButton(
+                      tooltip: 'Delete song',
+                      onPressed: () => widget.onDeleteTrack(
+                        _entry.id,
+                        _entry.tracks[i],
+                      ),
+                      icon: const Icon(Icons.delete_outline),
+                    ),
+                  ],
+                ),
                 onTap: () => widget.onPlayTrack(_entry.tracks[i]),
               ),
         ],

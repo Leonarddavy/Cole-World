@@ -8,13 +8,17 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:path/path.dart' as path;
+import 'package:path_provider/path_provider.dart';
 
 import '../data/seed_data.dart';
 import '../models/collection_models.dart';
 import '../models/entry_menu_action.dart';
+import '../services/app_prefs.dart';
 import '../services/library_storage.dart';
 import '../ui/collection_type_ui.dart';
+import '../utils/object_url.dart';
 import '../widgets/floating_nav_bar.dart';
+import '../widgets/graffiti_scaffold.dart';
 import '../widgets/mini_player_bar.dart';
 import 'artist_history_page.dart';
 import 'collection_detail_page.dart';
@@ -29,8 +33,10 @@ class HomeShell extends StatefulWidget {
 
 class _HomeShellState extends State<HomeShell> {
   final AudioPlayer _audioPlayer = AudioPlayer();
+  final AppPrefs _prefs = const AppPrefs();
   final LibraryStorage _libraryStorage = const LibraryStorage();
   final Random _random = Random();
+  final Set<String> _ownedObjectUrls = {};
 
   late List<CollectionEntry> _entries = seedEntries();
   StreamSubscription<PlayerState>? _playerStateSub;
@@ -39,6 +45,7 @@ class _HomeShellState extends State<HomeShell> {
 
   int _tabIndex = 0;
   int _previousTabIndex = 0;
+  bool _showStoryTab = true;
   Track? _currentTrack;
   bool _isPlaying = false;
   Duration _position = Duration.zero;
@@ -48,6 +55,7 @@ class _HomeShellState extends State<HomeShell> {
   void initState() {
     super.initState();
     unawaited(_hydrateLibrary());
+    unawaited(_hydratePrefs());
     _playerStateSub = _audioPlayer.playerStateStream.listen((state) {
       if (!mounted) {
         return;
@@ -76,6 +84,9 @@ class _HomeShellState extends State<HomeShell> {
 
   @override
   void dispose() {
+    for (final url in _ownedObjectUrls) {
+      revokeObjectUrl(url);
+    }
     _playerStateSub?.cancel();
     _positionSub?.cancel();
     _durationSub?.cancel();
@@ -100,6 +111,15 @@ class _HomeShellState extends State<HomeShell> {
     return '${DateTime.now().microsecondsSinceEpoch}_${_random.nextInt(99999)}';
   }
 
+  Future<Directory> _audioLibraryDir() async {
+    final directory = await getApplicationDocumentsDirectory();
+    final audioDir = Directory(path.join(directory.path, 'audio_library'));
+    if (!await audioDir.exists()) {
+      await audioDir.create(recursive: true);
+    }
+    return audioDir;
+  }
+
   Future<void> _hydrateLibrary() async {
     final loaded = await _libraryStorage.load();
     if (!mounted) {
@@ -114,10 +134,202 @@ class _HomeShellState extends State<HomeShell> {
     });
   }
 
+  Future<void> _hydratePrefs() async {
+    final prefs = await _prefs.load();
+    if (!mounted) {
+      return;
+    }
+    final showStory = prefs['showStoryTab'];
+    setState(() {
+      _showStoryTab = showStory is bool ? showStory : true;
+      if (!_showStoryTab && _tabIndex >= 3) {
+        _tabIndex = 0;
+        _previousTabIndex = 0;
+      }
+    });
+  }
+
   Future<void> _persistLibrary() async {
     await _libraryStorage.save(_entries);
   }
 
+  Future<void> _persistPrefs() async {
+    await _prefs.save({'showStoryTab': _showStoryTab});
+  }
+
+  Future<bool> _confirmDelete({
+    required String title,
+    required String body,
+    required String confirmLabel,
+  }) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: Text(title),
+          content: Text(body),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: Text(confirmLabel),
+            ),
+          ],
+        );
+      },
+    );
+    return confirmed == true;
+  }
+
+  void _releaseTrackResources(Track track) {
+    final raw = track.filePath.trim();
+    if (raw.startsWith('blob:') && _ownedObjectUrls.remove(raw)) {
+      revokeObjectUrl(raw);
+    }
+  }
+
+  Future<void> _deleteManagedAudioIfUnused(String filePath) async {
+    if (kIsWeb) {
+      return;
+    }
+    final trimmed = filePath.trim();
+    if (trimmed.isEmpty) {
+      return;
+    }
+
+    final uri = _audioUriFromPath(trimmed);
+    if (uri != null && uri.scheme != 'file') {
+      return;
+    }
+
+    final audioDir = await _audioLibraryDir();
+    final onDiskPath = uri == null ? trimmed : File.fromUri(uri).path;
+    if (!path.isWithin(audioDir.path, onDiskPath)) {
+      return;
+    }
+
+    final stillUsed = _entries.any(
+      (entry) => entry.tracks.any((t) => t.filePath.trim() == trimmed),
+    );
+    if (stillUsed) {
+      return;
+    }
+
+    try {
+      final file = File(onDiskPath);
+      if (await file.exists()) {
+        await file.delete();
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _deleteTrackFromEntry(String entryId, Track track) async {
+    final entry = _entryById(entryId);
+    if (entry == null) {
+      return;
+    }
+
+    final ok = await _confirmDelete(
+      title: 'Delete Song',
+      body: 'Remove "${track.title}" from "${entry.title}"?',
+      confirmLabel: 'Delete',
+    );
+    if (!ok || !mounted) {
+      return;
+    }
+
+    if (_currentTrack?.id == track.id) {
+      try {
+        await _audioPlayer.stop();
+      } catch (_) {}
+      setState(() {
+        _currentTrack = null;
+        _isPlaying = false;
+        _position = Duration.zero;
+      });
+    }
+
+    _releaseTrackResources(track);
+
+    final updated = entry.copyWith(
+      tracks: entry.tracks.where((t) => t.id != track.id).toList(),
+    );
+    _replaceEntry(updated);
+    unawaited(_persistLibrary());
+    unawaited(_deleteManagedAudioIfUnused(track.filePath));
+    _showMessage('Song deleted.');
+  }
+
+  Future<void> _deleteCollection(CollectionEntry entry) async {
+    final ok = await _confirmDelete(
+      title: 'Delete ${entry.type.label}',
+      body: 'Delete "${entry.title}" from your library?',
+      confirmLabel: 'Delete',
+    );
+    if (!ok || !mounted) {
+      return;
+    }
+
+    final removedTracks = entry.tracks;
+    if (removedTracks.any((t) => t.id == _currentTrack?.id)) {
+      try {
+        await _audioPlayer.stop();
+      } catch (_) {}
+      setState(() {
+        _currentTrack = null;
+        _isPlaying = false;
+        _position = Duration.zero;
+      });
+    }
+
+    for (final t in removedTracks) {
+      _releaseTrackResources(t);
+    }
+
+    setState(() {
+      _entries = _entries.where((e) => e.id != entry.id).toList();
+    });
+    unawaited(_persistLibrary());
+    for (final t in removedTracks) {
+      unawaited(_deleteManagedAudioIfUnused(t.filePath));
+    }
+    _showMessage('${entry.type.label} deleted.');
+  }
+
+  Future<void> _deleteStoryTab() async {
+    if (!_showStoryTab) {
+      return;
+    }
+    final ok = await _confirmDelete(
+      title: 'Remove Story Tab',
+      body: 'This hides the Story tab. You can restore it later.',
+      confirmLabel: 'Remove',
+    );
+    if (!ok || !mounted) {
+      return;
+    }
+    setState(() {
+      _showStoryTab = false;
+      if (_tabIndex >= 3) {
+        _tabIndex = 0;
+        _previousTabIndex = 0;
+      }
+    });
+    unawaited(_persistPrefs());
+  }
+
+  Future<void> _restoreStoryTab() async {
+    if (_showStoryTab) {
+      return;
+    }
+    setState(() {
+      _showStoryTab = true;
+    });
+    unawaited(_persistPrefs());
+  }
   void _showMessage(String message) {
     if (!mounted) {
       return;
@@ -127,22 +339,89 @@ class _HomeShellState extends State<HomeShell> {
     ).showSnackBar(SnackBar(content: Text(message)));
   }
 
-  List<Track> _tracksFromFiles(
+  bool _looksLikeAudioUri(String value) {
+    return value.startsWith('content://') ||
+        value.startsWith('file://') ||
+        value.startsWith('http://') ||
+        value.startsWith('https://') ||
+        value.startsWith('blob:') ||
+        value.startsWith('data:');
+  }
+
+  Uri? _audioUriFromPath(String rawPath) {
+    final trimmed = rawPath.trim();
+    if (trimmed.isEmpty || !_looksLikeAudioUri(trimmed)) {
+      return null;
+    }
+    return Uri.tryParse(trimmed);
+  }
+
+  Future<String?> _persistAudioFile(PlatformFile file) async {
+    final sourcePath = file.path?.trim() ?? '';
+    if (sourcePath.isEmpty) {
+      if (kIsWeb && file.bytes != null && file.bytes!.isNotEmpty) {
+        final url = createObjectUrlFromBytes(file.bytes!);
+        if (url != null && url.isNotEmpty) {
+          _ownedObjectUrls.add(url);
+          return url;
+        }
+      }
+      return null;
+    }
+    if (kIsWeb) {
+      return sourcePath;
+    }
+
+    final uri = _audioUriFromPath(sourcePath);
+    if (uri != null && uri.scheme != 'file') {
+      return sourcePath;
+    }
+
+    final sourceFile = uri == null ? File(sourcePath) : File.fromUri(uri);
+    if (!await sourceFile.exists()) {
+      return sourcePath;
+    }
+
+    final audioDir = await _audioLibraryDir();
+    if (path.isWithin(audioDir.path, sourceFile.path)) {
+      return sourceFile.path;
+    }
+
+    final extension = path.extension(sourceFile.path);
+    final targetPath =
+        path.join(audioDir.path, '${_newId()}${extension.isEmpty ? '' : extension}');
+    try {
+      final copied = await sourceFile.copy(targetPath);
+      return copied.path;
+    } catch (_) {
+      return sourcePath;
+    }
+  }
+
+  Future<List<Track>> _tracksFromFiles(
     List<PlatformFile> files, {
     required String artist,
-  }) {
-    return files.where((file) => file.path != null).map((file) {
-      final filePath = file.path!;
+  }) async {
+    final tracks = <Track>[];
+    for (final file in files) {
+      final filePath = await _persistAudioFile(file);
+      if (filePath == null || filePath.isEmpty) {
+        continue;
+      }
+      final baseName = file.name.isNotEmpty ? file.name : filePath;
       final title = path
-          .basenameWithoutExtension(filePath)
+          .basenameWithoutExtension(baseName)
           .replaceAll('_', ' ');
-      return Track(
-        id: _newId(),
-        title: title.isEmpty ? 'Untitled Track' : title,
-        artist: artist,
-        filePath: filePath,
+      tracks.add(
+        Track(
+          id: _newId(),
+          title: title.isEmpty ? 'Untitled Track' : title,
+          artist: artist,
+          filePath: filePath,
+        ),
       );
-    }).toList();
+    }
+    return tracks;
   }
 
   void _replaceEntry(CollectionEntry updated) {
@@ -155,10 +434,22 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   Future<void> _playTrack(Track track) async {
-    if (track.filePath.isEmpty ||
-        (!kIsWeb && !File(track.filePath).existsSync())) {
+    final rawPath = track.filePath.trim();
+    if (rawPath.isEmpty) {
       _showMessage('Track file not found. Upload a local file for this song.');
       return;
+    }
+
+    final uri = _audioUriFromPath(rawPath);
+    if (!kIsWeb) {
+      if (uri == null && !File(rawPath).existsSync()) {
+        _showMessage('Track file not found. Upload a local file for this song.');
+        return;
+      }
+      if (uri?.scheme == 'file' && !File.fromUri(uri!).existsSync()) {
+        _showMessage('Track file not found. Upload a local file for this song.');
+        return;
+      }
     }
 
     try {
@@ -171,7 +462,11 @@ class _HomeShellState extends State<HomeShell> {
         return;
       }
 
-      await _audioPlayer.setFilePath(track.filePath);
+      if (uri != null) {
+        await _audioPlayer.setAudioSource(AudioSource.uri(uri));
+      } else {
+        await _audioPlayer.setFilePath(rawPath);
+      }
       await _audioPlayer.play();
       if (!mounted) {
         return;
@@ -264,12 +559,13 @@ class _HomeShellState extends State<HomeShell> {
     final result = await FilePicker.platform.pickFiles(
       type: FileType.audio,
       allowMultiple: true,
+      withData: kIsWeb,
     );
     if (result == null || result.files.isEmpty) {
       return null;
     }
 
-    final tracks = _tracksFromFiles(result.files, artist: 'J. Cole');
+    final tracks = await _tracksFromFiles(result.files, artist: 'J. Cole');
     if (tracks.isEmpty) {
       _showMessage('No valid audio files selected.');
       return null;
@@ -407,6 +703,7 @@ class _HomeShellState extends State<HomeShell> {
                           final result = await FilePicker.platform.pickFiles(
                             type: FileType.audio,
                             allowMultiple: true,
+                            withData: kIsWeb,
                           );
                           if (result == null || result.files.isEmpty) {
                             return;
@@ -425,7 +722,7 @@ class _HomeShellState extends State<HomeShell> {
                     child: const Text('Cancel'),
                   ),
                   FilledButton(
-                    onPressed: () {
+                    onPressed: () async {
                       final title = titleController.text.trim();
                       if (title.isEmpty) {
                         return;
@@ -435,10 +732,13 @@ class _HomeShellState extends State<HomeShell> {
                           .map((name) => name.trim())
                           .where((name) => name.isNotEmpty)
                           .toList();
-                      final tracks = _tracksFromFiles(
+                      final tracks = await _tracksFromFiles(
                         selectedSongs,
                         artist: 'J. Cole',
                       );
+                      if (!context.mounted) {
+                        return;
+                      }
                       Navigator.pop(
                         context,
                         CollectionEntry(
@@ -487,6 +787,7 @@ class _HomeShellState extends State<HomeShell> {
           isPlaying: _isPlaying,
           onPlayTrack: _playTrack,
           onReorderTracks: _reorderEntryTracks,
+          onDeleteTrack: _deleteTrackFromEntry,
           onMenuAction: _runMenuActionFromDetail,
           resolveEntry: _entryById,
         ),
@@ -512,6 +813,9 @@ class _HomeShellState extends State<HomeShell> {
       case EntryMenuAction.uploadSongs:
         await _uploadSongsToEntry(entry.id);
         break;
+      case EntryMenuAction.deleteCollection:
+        await _deleteCollection(entry);
+        break;
     }
   }
 
@@ -529,16 +833,21 @@ class _HomeShellState extends State<HomeShell> {
       case EntryMenuAction.uploadSongs:
         await _uploadSongsToEntry(entry.id);
         break;
+      case EntryMenuAction.deleteCollection:
+        await _deleteCollection(entry);
+        break;
     }
   }
 
   void _onTabSelected(int index) {
-    if (index == _tabIndex) {
+    final maxIndex = _showStoryTab ? 3 : 2;
+    final clamped = index.clamp(0, maxIndex).toInt();
+    if (clamped == _tabIndex) {
       return;
     }
     setState(() {
       _previousTabIndex = _tabIndex;
-      _tabIndex = index;
+      _tabIndex = clamped;
     });
   }
 
@@ -551,7 +860,7 @@ class _HomeShellState extends State<HomeShell> {
       case 2:
         return 'Playlist';
       case 3:
-        return 'Story';
+        return _showStoryTab ? 'Story' : 'J. Cole Vault';
       default:
         return 'J. Cole Vault';
     }
@@ -559,7 +868,8 @@ class _HomeShellState extends State<HomeShell> {
 
   @override
   Widget build(BuildContext context) {
-    final page = switch (_tabIndex) {
+    final effectiveIndex = (!_showStoryTab && _tabIndex >= 3) ? 0 : _tabIndex;
+    final page = switch (effectiveIndex) {
       0 => LibraryPage(
         key: const ValueKey('albums'),
         tabType: CollectionType.album,
@@ -588,7 +898,7 @@ class _HomeShellState extends State<HomeShell> {
         onCreateCollection: () => _createCollection(CollectionType.playlist),
         onUploadToCollection: () =>
             _uploadSongsToTypeCollection(CollectionType.playlist),
-        onMenuAction: null,
+        onMenuAction: _runMenuAction,
       ),
       _ => const ArtistHistoryPage(key: ValueKey('story')),
     };
@@ -598,8 +908,44 @@ class _HomeShellState extends State<HomeShell> {
         ? const Offset(0.2, 0)
         : const Offset(-0.2, 0);
 
-    return Scaffold(
-      appBar: AppBar(centerTitle: false, title: Text(_title)),
+    return GraffitiScaffold(
+      appBar: AppBar(
+        centerTitle: false,
+        title: Text(
+          _title,
+          style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                letterSpacing: 1.2,
+              ),
+        ),
+        actions: [
+          PopupMenuButton<String>(
+            tooltip: 'App options',
+            icon: const Icon(Icons.more_vert),
+            onSelected: (value) async {
+              switch (value) {
+                case 'remove_story':
+                  await _deleteStoryTab();
+                  break;
+                case 'restore_story':
+                  await _restoreStoryTab();
+                  break;
+              }
+            },
+            itemBuilder: (context) => [
+              if (_showStoryTab)
+                const PopupMenuItem(
+                  value: 'remove_story',
+                  child: Text('Remove Story Tab'),
+                )
+              else
+                const PopupMenuItem(
+                  value: 'restore_story',
+                  child: Text('Restore Story Tab'),
+                ),
+            ],
+          ),
+        ],
+      ),
       body: AnimatedSwitcher(
         duration: const Duration(milliseconds: 360),
         switchInCurve: Curves.easeOutCubic,
@@ -637,27 +983,28 @@ class _HomeShellState extends State<HomeShell> {
             FloatingNavBar(
               selectedIndex: _tabIndex,
               onSelected: _onTabSelected,
-              items: const [
-                NavItem(
+              items: [
+                const NavItem(
                   label: 'Albums',
                   icon: Icons.library_books_outlined,
                   selectedIcon: Icons.library_books,
                 ),
-                NavItem(
+                const NavItem(
                   label: 'Singles',
                   icon: Icons.music_note_outlined,
                   selectedIcon: Icons.music_note,
                 ),
-                NavItem(
+                const NavItem(
                   label: 'Playlist',
                   icon: Icons.playlist_play_outlined,
                   selectedIcon: Icons.playlist_play,
                 ),
-                NavItem(
-                  label: 'Story',
-                  icon: Icons.history_edu_outlined,
-                  selectedIcon: Icons.history_edu,
-                ),
+                if (_showStoryTab)
+                  const NavItem(
+                    label: 'Story',
+                    icon: Icons.history_edu_outlined,
+                    selectedIcon: Icons.history_edu,
+                  ),
               ],
             ),
           ],

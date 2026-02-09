@@ -50,8 +50,19 @@ class _StaggeredSongTileState extends State<StaggeredSongTile> {
         offset: _visible ? Offset.zero : const Offset(0.18, 0),
         duration: const Duration(milliseconds: 420),
         curve: Curves.easeOutCubic,
-        child: Card(
+        child: Container(
           margin: const EdgeInsets.only(bottom: 8),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(16),
+            gradient: const LinearGradient(
+              colors: [Color(0xFF201812), Color(0xFF17110D)],
+            ),
+            border: Border.all(
+              color: widget.showPlaying
+                  ? const Color(0xFFFFB547)
+                  : Colors.white12,
+            ),
+          ),
           child: ListTile(
             leading: const Icon(Icons.music_note),
             title: Text(widget.track.title),

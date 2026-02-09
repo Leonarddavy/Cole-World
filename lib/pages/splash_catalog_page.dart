@@ -2,6 +2,9 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../widgets/graffiti_scaffold.dart';
+import '../widgets/graffiti_tag.dart';
+
 class SplashCatalogPage extends StatefulWidget {
   const SplashCatalogPage({super.key, required this.onFinished});
 
@@ -75,31 +78,32 @@ class _SplashCatalogPageState extends State<SplashCatalogPage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      body: Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [Color(0xFF171411), Color(0xFF2B2117)],
-          ),
-        ),
-        child: SafeArea(
+    final theme = Theme.of(context);
+    return GraffitiScaffold(
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(18, 20, 18, 16),
           child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const SizedBox(height: 24),
+              const GraffitiTag(label: 'Vault Preview'),
+              const SizedBox(height: 18),
               Text(
-                'J. Cole Vault',
-                style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-                  fontWeight: FontWeight.w700,
+                'J. Cole',
+                style: theme.textTheme.displayLarge,
+              ),
+              Text(
+                'Vault',
+                style: theme.textTheme.displayLarge?.copyWith(
+                  color: theme.colorScheme.secondary,
                 ),
               ),
-              const SizedBox(height: 4),
+              const SizedBox(height: 6),
               Text(
                 'Quick Catalog Highlights',
-                style: Theme.of(context).textTheme.bodyMedium,
+                style: theme.textTheme.bodyMedium,
               ),
-              const SizedBox(height: 22),
+              const SizedBox(height: 20),
               Expanded(
                 child: PageView.builder(
                   controller: _pageController,
@@ -112,27 +116,31 @@ class _SplashCatalogPageState extends State<SplashCatalogPage> {
                       curve: Curves.easeOutCubic,
                       scale: _index == index ? 1 : 0.92,
                       child: Padding(
-                        padding: const EdgeInsets.fromLTRB(22, 10, 22, 32),
+                        padding: const EdgeInsets.fromLTRB(12, 8, 12, 24),
                         child: Container(
                           decoration: BoxDecoration(
-                            borderRadius: BorderRadius.circular(24),
-                            color: const Color(0xE8221B14),
-                            border: Border.all(color: Colors.white10),
+                            borderRadius: BorderRadius.circular(26),
+                            gradient: const LinearGradient(
+                              colors: [Color(0xFF241B14), Color(0xFF17110D)],
+                            ),
+                            border: Border.all(color: Colors.white12),
+                            boxShadow: const [
+                              BoxShadow(
+                                color: Color(0x66000000),
+                                blurRadius: 18,
+                                offset: Offset(0, 12),
+                              ),
+                            ],
                           ),
                           padding: const EdgeInsets.all(22),
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Text(
-                                item.year,
-                                style: Theme.of(context).textTheme.labelLarge
-                                    ?.copyWith(color: const Color(0xFFE8B55B)),
-                              ),
-                              const SizedBox(height: 14),
+                              GraffitiTag(label: item.year),
+                              const SizedBox(height: 16),
                               Text(
                                 item.title,
-                                style: Theme.of(context).textTheme.headlineSmall
-                                    ?.copyWith(fontWeight: FontWeight.w700),
+                                style: theme.textTheme.headlineMedium,
                               ),
                               const SizedBox(height: 12),
                               Text(item.detail),
@@ -151,23 +159,31 @@ class _SplashCatalogPageState extends State<SplashCatalogPage> {
                     AnimatedContainer(
                       duration: const Duration(milliseconds: 260),
                       curve: Curves.easeOutCubic,
-                      width: _index == i ? 20 : 8,
+                      width: _index == i ? 22 : 8,
                       height: 8,
                       decoration: BoxDecoration(
                         borderRadius: BorderRadius.circular(20),
                         color: _index == i
-                            ? const Color(0xFFE4B159)
+                            ? theme.colorScheme.primary
                             : Colors.white30,
                       ),
                     ),
                 ],
               ),
               const SizedBox(height: 16),
-              TextButton(
-                onPressed: widget.onFinished,
-                child: const Text('Skip'),
+              Row(
+                children: [
+                  TextButton(
+                    onPressed: widget.onFinished,
+                    child: const Text('Skip'),
+                  ),
+                  const Spacer(),
+                  FilledButton(
+                    onPressed: widget.onFinished,
+                    child: const Text('Enter Vault'),
+                  ),
+                ],
               ),
-              const SizedBox(height: 12),
             ],
           ),
         ),

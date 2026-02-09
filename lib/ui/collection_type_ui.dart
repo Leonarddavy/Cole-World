@@ -30,6 +30,8 @@ extension CollectionTypeUi on CollectionType {
   }
 
   bool get supportsMenuEdit {
-    return this == CollectionType.album || this == CollectionType.single;
+    return this == CollectionType.album ||
+        this == CollectionType.single ||
+        this == CollectionType.playlist;
   }
 }

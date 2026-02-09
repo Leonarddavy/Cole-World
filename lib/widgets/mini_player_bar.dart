@@ -41,8 +41,17 @@ class MiniPlayerBar extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(16),
-        color: const Color(0xEE1A1917),
+        gradient: const LinearGradient(
+          colors: [Color(0xFF1F1812), Color(0xFF17110D)],
+        ),
         border: Border.all(color: Colors.white12),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x55000000),
+            blurRadius: 12,
+            offset: Offset(0, 8),
+          ),
+        ],
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -82,13 +91,21 @@ class MiniPlayerBar extends StatelessWidget {
           ),
           const SizedBox(height: 4),
           WaveformStrip(progress: progress.clamp(0.0, 1.0)),
-          Slider(
-            min: 0,
-            max: maxMillis.toDouble(),
-            value: clampedMillis,
-            onChanged: duration.inMilliseconds <= 0
-                ? null
-                : (value) => onSeek(Duration(milliseconds: value.round())),
+          SliderTheme(
+            data: SliderTheme.of(context).copyWith(
+              activeTrackColor: const Color(0xFFFFB547),
+              inactiveTrackColor: Colors.white24,
+              thumbColor: const Color(0xFF2EE6D6),
+              overlayColor: const Color(0x332EE6D6),
+            ),
+            child: Slider(
+              min: 0,
+              max: maxMillis.toDouble(),
+              value: clampedMillis,
+              onChanged: duration.inMilliseconds <= 0
+                  ? null
+                  : (value) => onSeek(Duration(milliseconds: value.round())),
+            ),
           ),
           Row(
             children: [
@@ -151,7 +168,7 @@ class WaveformStrip extends StatelessWidget {
                 decoration: BoxDecoration(
                   borderRadius: BorderRadius.circular(4),
                   color: i / (barHeights.length - 1) <= progress
-                      ? const Color(0xFFE5B65E)
+                      ? const Color(0xFF2EE6D6)
                       : Colors.white24,
                 ),
               ),
