@@ -10,6 +10,7 @@ class StaggeredSongTile extends StatefulWidget {
     required this.track,
     required this.index,
     required this.showPlaying,
+    this.leading,
     this.trailing,
     required this.onTap,
   });
@@ -17,6 +18,7 @@ class StaggeredSongTile extends StatefulWidget {
   final Track track;
   final int index;
   final bool showPlaying;
+  final Widget? leading;
   final Widget? trailing;
   final VoidCallback onTap;
 
@@ -64,7 +66,7 @@ class _StaggeredSongTileState extends State<StaggeredSongTile> {
             ),
           ),
           child: ListTile(
-            leading: const Icon(Icons.music_note),
+            leading: widget.leading ?? const Icon(Icons.music_note),
             title: Text(widget.track.title),
             subtitle: Text(widget.track.artist),
             trailing:

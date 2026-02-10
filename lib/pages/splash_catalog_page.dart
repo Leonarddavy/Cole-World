@@ -6,9 +6,20 @@ import '../widgets/graffiti_scaffold.dart';
 import '../widgets/graffiti_tag.dart';
 
 class SplashCatalogPage extends StatefulWidget {
-  const SplashCatalogPage({super.key, required this.onFinished});
+  const SplashCatalogPage({
+    super.key,
+    required this.onFinished,
+    this.autoAdvance = true,
+    this.tagLabel = 'Vault Preview',
+    this.primaryCtaLabel = 'Enter Vault',
+    this.secondaryCtaLabel = 'Skip',
+  });
 
   final VoidCallback onFinished;
+  final bool autoAdvance;
+  final String tagLabel;
+  final String primaryCtaLabel;
+  final String secondaryCtaLabel;
 
   @override
   State<SplashCatalogPage> createState() => _SplashCatalogPageState();
@@ -50,6 +61,9 @@ class _SplashCatalogPageState extends State<SplashCatalogPage> {
   @override
   void initState() {
     super.initState();
+    if (!widget.autoAdvance) {
+      return;
+    }
     _timer = Timer.periodic(const Duration(milliseconds: 2100), (_) {
       if (!mounted) {
         return;
@@ -85,11 +99,20 @@ class _SplashCatalogPageState extends State<SplashCatalogPage> {
           padding: const EdgeInsets.fromLTRB(18, 20, 18, 16),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const GraffitiTag(label: 'Vault Preview'),
+              children: [
+              GraffitiTag(label: widget.tagLabel),
+              const SizedBox(height: 14),
+              Center(
+                child: Image.asset(
+                  'assets/logo26.png',
+                  height: 86,
+                  fit: BoxFit.contain,
+                  filterQuality: FilterQuality.high,
+                ),
+              ),
               const SizedBox(height: 18),
               Text(
-                'J. Cole',
+                'II.VI',
                 style: theme.textTheme.displayLarge,
               ),
               Text(
@@ -107,7 +130,9 @@ class _SplashCatalogPageState extends State<SplashCatalogPage> {
               Expanded(
                 child: PageView.builder(
                   controller: _pageController,
-                  physics: const NeverScrollableScrollPhysics(),
+                  physics: widget.autoAdvance
+                      ? const NeverScrollableScrollPhysics()
+                      : const BouncingScrollPhysics(),
                   itemCount: _items.length,
                   itemBuilder: (context, index) {
                     final item = _items[index];
@@ -131,20 +156,38 @@ class _SplashCatalogPageState extends State<SplashCatalogPage> {
                                 offset: Offset(0, 12),
                               ),
                             ],
-                          ),
+                        ),
                           padding: const EdgeInsets.all(22),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              GraffitiTag(label: item.year),
-                              const SizedBox(height: 16),
-                              Text(
-                                item.title,
-                                style: theme.textTheme.headlineMedium,
-                              ),
-                              const SizedBox(height: 12),
-                              Text(item.detail),
-                            ],
+                          child: LayoutBuilder(
+                            builder: (context, constraints) {
+                              final compact = constraints.maxHeight < 150;
+                              final titleLines = compact ? 1 : 2;
+                              final detailLines = compact ? 2 : 3;
+                              final titleSpacing = compact ? 8.0 : 16.0;
+                              final detailSpacing = compact ? 6.0 : 12.0;
+
+                              return Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  GraffitiTag(label: item.year),
+                                  SizedBox(height: titleSpacing),
+                                  Text(
+                                    item.title,
+                                    maxLines: titleLines,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: theme.textTheme.headlineMedium,
+                                  ),
+                                  SizedBox(height: detailSpacing),
+                                  Flexible(
+                                    child: Text(
+                                      item.detail,
+                                      maxLines: detailLines,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                                ],
+                              );
+                            },
                           ),
                         ),
                       ),
@@ -175,12 +218,12 @@ class _SplashCatalogPageState extends State<SplashCatalogPage> {
                 children: [
                   TextButton(
                     onPressed: widget.onFinished,
-                    child: const Text('Skip'),
+                    child: Text(widget.secondaryCtaLabel),
                   ),
                   const Spacer(),
                   FilledButton(
                     onPressed: widget.onFinished,
-                    child: const Text('Enter Vault'),
+                    child: Text(widget.primaryCtaLabel),
                   ),
                 ],
               ),

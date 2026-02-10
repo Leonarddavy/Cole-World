@@ -11,7 +11,7 @@ class JColeVaultApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'J. Cole Vault',
+      title: 'II.VI',
       theme: AppTheme.dark,
       home: const AppRoot(),
     );
