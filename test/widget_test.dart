@@ -13,7 +13,8 @@ void main() {
   testWidgets('loads J. Cole vault shell', (WidgetTester tester) async {
     await tester.pumpWidget(const JColeVaultApp());
 
-    expect(find.text('J. Cole Vault'), findsOneWidget);
+    expect(find.text('II.VI'), findsOneWidget);
+    expect(find.text('Vault'), findsOneWidget);
     expect(find.text('Quick Catalog Highlights'), findsOneWidget);
   });
 }

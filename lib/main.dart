@@ -12,8 +12,18 @@ Future<void> main() async {
           defaultTargetPlatform == TargetPlatform.iOS)) {
     await JustAudioBackground.init(
       androidNotificationChannelId: 'com.example.jcole_player.playback',
-      androidNotificationChannelName: 'Playback',
-      androidNotificationOngoing: true,
+      androidNotificationChannelName: 'II.VI Playback',
+      androidNotificationChannelDescription:
+          'Background playback controls for II.VI.',
+      notificationColor: const Color(0xFFFFB547),
+      androidNotificationIcon: 'drawable/ic_stat_ii_vi',
+      androidShowNotificationBadge: false,
+      androidNotificationClickStartsActivity: true,
+      androidResumeOnClick: true,
+      androidStopForegroundOnPause: false,
+      fastForwardInterval: const Duration(seconds: 10),
+      rewindInterval: const Duration(seconds: 10),
+      preloadArtwork: true,
     );
   }
   // Ensure GoogleFonts can fetch in release builds (Android needs INTERNET permission in main manifest).

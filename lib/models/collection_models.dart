@@ -48,7 +48,7 @@ class CollectionEntry {
       'title': title,
       'history': history,
       'featuredArtists': featuredArtists,
-      'thumbnailPath': thumbnailPath,
+      'thumbnailPath': _sanitizePersistedPath(thumbnailPath),
       'thumbnailDataBase64': thumbnailDataBase64,
       'tracks': tracks.map((track) => track.toJson()).toList(),
     };
@@ -67,7 +67,7 @@ class CollectionEntry {
           .whereType<Map>()
           .map((track) => Track.fromJson(Map<String, dynamic>.from(track)))
           .toList(),
-      thumbnailPath: json['thumbnailPath']?.toString(),
+      thumbnailPath: _sanitizePersistedPath(json['thumbnailPath']?.toString()),
       thumbnailDataBase64: json['thumbnailDataBase64']?.toString(),
     );
   }
@@ -77,6 +77,17 @@ class CollectionEntry {
       (type) => type.name == name,
       orElse: () => CollectionType.album,
     );
+  }
+
+  static String? _sanitizePersistedPath(String? rawPath) {
+    if (rawPath == null) {
+      return null;
+    }
+    final trimmed = rawPath.trim();
+    if (trimmed.startsWith('blob:') || trimmed.startsWith('data:')) {
+      return null;
+    }
+    return trimmed.isEmpty ? null : trimmed;
   }
 }
 
@@ -94,15 +105,29 @@ class Track {
   final String filePath;
 
   Map<String, dynamic> toJson() {
-    return {'id': id, 'title': title, 'artist': artist, 'filePath': filePath};
+    return {
+      'id': id,
+      'title': title,
+      'artist': artist,
+      'filePath': _sanitizePersistedFilePath(filePath),
+    };
   }
 
   static Track fromJson(Map<String, dynamic> json) {
+    final rawPath = (json['filePath'] ?? '').toString();
     return Track(
       id: (json['id'] ?? '').toString(),
       title: (json['title'] ?? '').toString(),
       artist: (json['artist'] ?? '').toString(),
-      filePath: (json['filePath'] ?? '').toString(),
+      filePath: _sanitizePersistedFilePath(rawPath),
     );
+  }
+
+  static String _sanitizePersistedFilePath(String rawPath) {
+    final trimmed = rawPath.trim();
+    if (trimmed.startsWith('blob:') || trimmed.startsWith('data:')) {
+      return '';
+    }
+    return trimmed;
   }
 }

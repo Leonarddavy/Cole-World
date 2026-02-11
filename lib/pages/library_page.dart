@@ -11,17 +11,26 @@ class LibraryPage extends StatelessWidget {
     super.key,
     required this.tabType,
     required this.entries,
+    required this.recentTracks,
     required this.onOpen,
+    required this.onPlayRecentTrack,
     required this.onCreateCollection,
     required this.onUploadToCollection,
+    this.onPlayAll,
+    this.onShufflePlay,
     required this.onMenuAction,
   });
 
   final CollectionType tabType;
   final List<CollectionEntry> entries;
+  final List<RecentTrackShortcut> recentTracks;
   final void Function(CollectionEntry entry) onOpen;
+  final Future<void> Function(Track track, CollectionEntry entry)
+  onPlayRecentTrack;
   final VoidCallback onCreateCollection;
   final VoidCallback onUploadToCollection;
+  final VoidCallback? onPlayAll;
+  final VoidCallback? onShufflePlay;
   final void Function(CollectionEntry entry, EntryMenuAction action)?
   onMenuAction;
 
@@ -46,6 +55,18 @@ class LibraryPage extends StatelessWidget {
                   icon: const Icon(Icons.upload_file),
                   label: Text('Upload To ${tabType.label}'),
                 ),
+                if (onPlayAll != null)
+                  FilledButton.tonalIcon(
+                    onPressed: onPlayAll,
+                    icon: const Icon(Icons.play_arrow),
+                    label: const Text('Play All'),
+                  ),
+                if (onShufflePlay != null)
+                  FilledButton.tonalIcon(
+                    onPressed: onShufflePlay,
+                    icon: const Icon(Icons.shuffle),
+                    label: const Text('Shuffle'),
+                  ),
               ],
             ),
           ),
@@ -71,6 +92,16 @@ class LibraryPage extends StatelessWidget {
             ),
           ),
         ),
+        if (recentTracks.isNotEmpty)
+          SliverPadding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+            sliver: SliverToBoxAdapter(
+              child: _RecentlyPlayedRail(
+                recentTracks: recentTracks,
+                onPlayTrack: onPlayRecentTrack,
+              ),
+            ),
+          ),
         if (entries.isEmpty)
           const SliverToBoxAdapter(
             child: Padding(
@@ -104,6 +135,16 @@ class LibraryPage extends StatelessWidget {
       ],
     );
   }
+}
+
+class RecentTrackShortcut {
+  const RecentTrackShortcut({
+    required this.entry,
+    required this.track,
+  });
+
+  final CollectionEntry entry;
+  final Track track;
 }
 
 class _PortraitCollectionCard extends StatelessWidget {
@@ -224,6 +265,97 @@ class _PortraitCollectionCard extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+class _RecentlyPlayedRail extends StatelessWidget {
+  const _RecentlyPlayedRail({
+    required this.recentTracks,
+    required this.onPlayTrack,
+  });
+
+  final List<RecentTrackShortcut> recentTracks;
+  final Future<void> Function(Track track, CollectionEntry entry) onPlayTrack;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            const GraffitiTag(label: 'Recently Played'),
+            const Spacer(),
+            Text(
+              '${recentTracks.length} track(s)',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
+        SizedBox(
+          height: 108,
+          child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            itemCount: recentTracks.length,
+            separatorBuilder: (_, index) => const SizedBox(width: 10),
+            itemBuilder: (context, index) {
+              final item = recentTracks[index];
+              return SizedBox(
+                width: 240,
+                child: Material(
+                  color: Colors.transparent,
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(16),
+                    onTap: () => onPlayTrack(item.track, item.entry),
+                    child: Container(
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(16),
+                        gradient: const LinearGradient(
+                          colors: [Color(0xFF201812), Color(0xFF17110D)],
+                        ),
+                        border: Border.all(color: Colors.white12),
+                      ),
+                      padding: const EdgeInsets.fromLTRB(12, 10, 10, 10),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.history, size: 20),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Text(
+                                  item.track.title,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                                Text(
+                                  '${item.entry.title} • ${item.entry.type.label}',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: Theme.of(context).textTheme.bodySmall,
+                                ),
+                              ],
+                            ),
+                          ),
+                          IconButton(
+                            tooltip: 'Play',
+                            onPressed: () => onPlayTrack(item.track, item.entry),
+                            icon: const Icon(Icons.play_arrow),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+      ],
     );
   }
 }

@@ -1,11 +1,11 @@
 import 'dart:convert';
-import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../models/collection_models.dart';
 import '../ui/collection_type_ui.dart';
+import '../utils/local_image.dart';
 
 class ArtworkCard extends StatelessWidget {
   const ArtworkCard({
@@ -23,21 +23,26 @@ class ArtworkCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final thumbnailPath = entry.thumbnailPath;
     final thumbData = entry.thumbnailDataBase64;
-    final Uint8List? bytes = thumbData == null || thumbData.isEmpty
-        ? null
-        : base64Decode(thumbData);
+    Uint8List? bytes;
+    if (thumbData != null && thumbData.isNotEmpty) {
+      try {
+        bytes = base64Decode(thumbData);
+      } on FormatException {
+        bytes = null;
+      }
+    }
 
     final hasMemoryThumb = bytes != null && bytes.isNotEmpty;
     final hasThumb =
-        !kIsWeb &&
         thumbnailPath != null &&
         thumbnailPath.isNotEmpty &&
-        File(thumbnailPath).existsSync();
+        !kIsWeb &&
+        canLoadLocalImage(thumbnailPath);
 
     final image = hasMemoryThumb
         ? Image.memory(bytes, fit: BoxFit.cover)
         : hasThumb
-        ? Image.file(File(thumbnailPath), fit: BoxFit.cover)
+        ? buildLocalImage(thumbnailPath, fit: BoxFit.cover)
         : Container(
             decoration: const BoxDecoration(
               gradient: LinearGradient(

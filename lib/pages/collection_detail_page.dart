@@ -112,7 +112,7 @@ class _CollectionDetailPageState extends State<CollectionDetailPage> {
                 shrinkWrap: true,
                 physics: const NeverScrollableScrollPhysics(),
                 itemCount: upNext.length,
-                separatorBuilder: (_, __) => const Divider(height: 1),
+                separatorBuilder: (_, index) => const Divider(height: 1),
                 itemBuilder: (context, index) {
                   final track = upNext[index];
                   return ListTile(
