@@ -1,19 +1,129 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
+class FontChoice {
+  const FontChoice({required this.key, required this.label});
+
+  final String key;
+  final String label;
+}
+
+class AppThemeSettings {
+  const AppThemeSettings({
+    this.primaryColorValue = 0xFFFFB547,
+    this.secondaryColorValue = 0xFF2EE6D6,
+    this.backgroundColorValue = 0xFF0C0B0A,
+    this.displayFontKey = 'rubik_wet_paint',
+    this.bodyFontKey = 'permanent_marker',
+  });
+
+  final int primaryColorValue;
+  final int secondaryColorValue;
+  final int backgroundColorValue;
+  final String displayFontKey;
+  final String bodyFontKey;
+
+  Color get primaryColor => Color(primaryColorValue);
+  Color get secondaryColor => Color(secondaryColorValue);
+  Color get backgroundColor => Color(backgroundColorValue);
+
+  AppThemeSettings copyWith({
+    int? primaryColorValue,
+    int? secondaryColorValue,
+    int? backgroundColorValue,
+    String? displayFontKey,
+    String? bodyFontKey,
+  }) {
+    return AppThemeSettings(
+      primaryColorValue: primaryColorValue ?? this.primaryColorValue,
+      secondaryColorValue: secondaryColorValue ?? this.secondaryColorValue,
+      backgroundColorValue: backgroundColorValue ?? this.backgroundColorValue,
+      displayFontKey: displayFontKey ?? this.displayFontKey,
+      bodyFontKey: bodyFontKey ?? this.bodyFontKey,
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'primaryColorValue': primaryColorValue,
+      'secondaryColorValue': secondaryColorValue,
+      'backgroundColorValue': backgroundColorValue,
+      'displayFontKey': displayFontKey,
+      'bodyFontKey': bodyFontKey,
+    };
+  }
+
+  static AppThemeSettings fromJson(Object? raw) {
+    if (raw is! Map) {
+      return const AppThemeSettings();
+    }
+    final json = Map<String, dynamic>.from(raw);
+    return AppThemeSettings(
+      primaryColorValue: _parseInt(json['primaryColorValue'], 0xFFFFB547),
+      secondaryColorValue: _parseInt(json['secondaryColorValue'], 0xFF2EE6D6),
+      backgroundColorValue: _parseInt(json['backgroundColorValue'], 0xFF0C0B0A),
+      displayFontKey: (json['displayFontKey'] ?? 'rubik_wet_paint')
+          .toString()
+          .trim(),
+      bodyFontKey: (json['bodyFontKey'] ?? 'permanent_marker')
+          .toString()
+          .trim(),
+    );
+  }
+
+  static int _parseInt(Object? raw, int fallback) {
+    if (raw is int) {
+      return raw;
+    }
+    if (raw is num) {
+      return raw.toInt();
+    }
+    final parsed = int.tryParse(raw?.toString() ?? '');
+    return parsed ?? fallback;
+  }
+}
+
 class AppTheme {
-  static ThemeData get dark {
+  static const List<FontChoice> displayFontChoices = [
+    FontChoice(key: 'rubik_wet_paint', label: 'Rubik Wet Paint'),
+    FontChoice(key: 'bangers', label: 'Bangers'),
+    FontChoice(key: 'black_ops_one', label: 'Black Ops One'),
+    FontChoice(key: 'oswald', label: 'Oswald'),
+    FontChoice(key: 'teko', label: 'Teko'),
+  ];
+
+  static const List<FontChoice> bodyFontChoices = [
+    FontChoice(key: 'permanent_marker', label: 'Permanent Marker'),
+    FontChoice(key: 'montserrat', label: 'Montserrat'),
+    FontChoice(key: 'lato', label: 'Lato'),
+    FontChoice(key: 'nunito_sans', label: 'Nunito Sans'),
+    FontChoice(key: 'open_sans', label: 'Open Sans'),
+  ];
+
+  static ThemeData dark({
+    AppThemeSettings settings = const AppThemeSettings(),
+  }) {
     const foreground = Color(0xFFF6F1E8);
-    const background = Color(0xFF0C0B0A);
-    const surface = Color(0xFF161310);
-    const surfaceAlt = Color(0xFF221B16);
-    const primary = Color(0xFFFFB547);
-    const secondary = Color(0xFF2EE6D6);
+    final background = settings.backgroundColor;
+    final surface = _shiftLightness(background, 0.055);
+    final surfaceAlt = _shiftLightness(background, 0.095);
+    final primary = settings.primaryColor;
+    final secondary = settings.secondaryColor;
     const tertiary = Color(0xFFB4FF5C);
+    final onPrimary =
+        ThemeData.estimateBrightnessForColor(primary) == Brightness.dark
+        ? Colors.white
+        : const Color(0xFF1B1209);
+    final onSecondary =
+        ThemeData.estimateBrightnessForColor(secondary) == Brightness.dark
+        ? Colors.white
+        : const Color(0xFF071C1A);
 
     TextStyle displayStyle(double size, {Color? color}) {
-      return GoogleFonts.rubikWetPaint(
+      return _displayStyle(
+        settings.displayFontKey,
         textStyle: const TextStyle(inherit: false),
+      ).copyWith(
         fontSize: size,
         color: color ?? foreground,
         letterSpacing: 0.9,
@@ -21,12 +131,10 @@ class AppTheme {
       );
     }
 
-    final baseText = GoogleFonts.permanentMarkerTextTheme(
+    final baseText = _applyBodyFont(
+      settings.bodyFontKey,
       ThemeData.dark().textTheme,
-    ).apply(
-      bodyColor: foreground,
-      displayColor: foreground,
-    );
+    ).apply(bodyColor: foreground, displayColor: foreground);
 
     final tunedText = baseText.copyWith(
       bodyLarge: baseText.bodyLarge?.copyWith(height: 1.35),
@@ -69,13 +177,13 @@ class AppTheme {
             platform: const _GraffitiPageTransitionsBuilder(),
         },
       ),
-      colorScheme: const ColorScheme.dark(
+      colorScheme: ColorScheme.dark(
         primary: primary,
         secondary: secondary,
         tertiary: tertiary,
         surface: surface,
-        onPrimary: Color(0xFF1B1209),
-        onSecondary: Color(0xFF071C1A),
+        onPrimary: onPrimary,
+        onSecondary: onSecondary,
         onSurface: foreground,
         surfaceTint: Colors.transparent,
       ),
@@ -93,10 +201,10 @@ class AppTheme {
         elevation: 0,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
       ),
-      snackBarTheme: const SnackBarThemeData(
+      snackBarTheme: SnackBarThemeData(
         behavior: SnackBarBehavior.floating,
-        backgroundColor: Color(0xFF241B12),
-        contentTextStyle: TextStyle(color: foreground),
+        backgroundColor: _shiftLightness(background, 0.1),
+        contentTextStyle: const TextStyle(color: foreground),
       ),
       dialogTheme: DialogThemeData(
         backgroundColor: surfaceAlt,
@@ -104,15 +212,15 @@ class AppTheme {
         titleTextStyle: displayStyle(26),
         contentTextStyle: textTheme.bodyMedium,
       ),
-      bottomSheetTheme: const BottomSheetThemeData(
+      bottomSheetTheme: BottomSheetThemeData(
         backgroundColor: surfaceAlt,
         surfaceTintColor: Colors.transparent,
-        shape: RoundedRectangleBorder(
+        shape: const RoundedRectangleBorder(
           borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
         ),
       ),
       chipTheme: ChipThemeData(
-        backgroundColor: const Color(0xFF241C14),
+        backgroundColor: _shiftLightness(background, 0.11),
         labelStyle: textTheme.labelLarge?.copyWith(letterSpacing: 0.3),
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(12),
@@ -122,8 +230,10 @@ class AppTheme {
       filledButtonTheme: FilledButtonThemeData(
         style: FilledButton.styleFrom(
           backgroundColor: primary,
-          foregroundColor: const Color(0xFF1B1209),
-          textStyle: textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w700),
+          foregroundColor: onPrimary,
+          textStyle: textTheme.labelLarge?.copyWith(
+            fontWeight: FontWeight.w700,
+          ),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(16),
           ),
@@ -136,18 +246,22 @@ class AppTheme {
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(16),
           ),
-          textStyle: textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w600),
+          textStyle: textTheme.labelLarge?.copyWith(
+            fontWeight: FontWeight.w600,
+          ),
         ),
       ),
       textButtonTheme: TextButtonThemeData(
         style: TextButton.styleFrom(
           foregroundColor: secondary,
-          textStyle: textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w600),
+          textStyle: textTheme.labelLarge?.copyWith(
+            fontWeight: FontWeight.w600,
+          ),
         ),
       ),
       inputDecorationTheme: InputDecorationTheme(
         filled: true,
-        fillColor: const Color(0xFF1C1612),
+        fillColor: _shiftLightness(background, 0.08),
         hintStyle: const TextStyle(color: Color(0xFF9B9288)),
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(16),
@@ -159,18 +273,56 @@ class AppTheme {
         ),
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(16),
-          borderSide: const BorderSide(color: primary, width: 1.2),
+          borderSide: BorderSide(color: primary, width: 1.2),
         ),
       ),
       sliderTheme: const SliderThemeData(
         trackHeight: 3,
         thumbShape: RoundSliderThumbShape(enabledThumbRadius: 7),
       ),
-      popupMenuTheme: const PopupMenuThemeData(
-        color: Color(0xFF251D15),
+      popupMenuTheme: PopupMenuThemeData(
+        color: _shiftLightness(background, 0.09),
         surfaceTintColor: Colors.transparent,
       ),
     );
+  }
+
+  static TextTheme _applyBodyFont(String fontKey, TextTheme base) {
+    switch (fontKey) {
+      case 'montserrat':
+        return GoogleFonts.montserratTextTheme(base);
+      case 'lato':
+        return GoogleFonts.latoTextTheme(base);
+      case 'nunito_sans':
+        return GoogleFonts.nunitoSansTextTheme(base);
+      case 'open_sans':
+        return GoogleFonts.openSansTextTheme(base);
+      case 'permanent_marker':
+      default:
+        return GoogleFonts.permanentMarkerTextTheme(base);
+    }
+  }
+
+  static TextStyle _displayStyle(String fontKey, {TextStyle? textStyle}) {
+    switch (fontKey) {
+      case 'bangers':
+        return GoogleFonts.bangers(textStyle: textStyle);
+      case 'black_ops_one':
+        return GoogleFonts.blackOpsOne(textStyle: textStyle);
+      case 'oswald':
+        return GoogleFonts.oswald(textStyle: textStyle);
+      case 'teko':
+        return GoogleFonts.teko(textStyle: textStyle);
+      case 'rubik_wet_paint':
+      default:
+        return GoogleFonts.rubikWetPaint(textStyle: textStyle);
+    }
+  }
+
+  static Color _shiftLightness(Color color, double delta) {
+    final hsl = HSLColor.fromColor(color);
+    final lightness = (hsl.lightness + delta).clamp(0.0, 1.0).toDouble();
+    return hsl.withLightness(lightness).toColor();
   }
 }
 

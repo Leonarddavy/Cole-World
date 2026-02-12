@@ -26,3 +26,10 @@ Future<String?> copyLocalFileToPath({
 }
 
 Future<void> deleteLocalFile(String filePath) async {}
+
+Future<List<String>> listAudioFilesRecursively(
+  String directoryPath, {
+  Set<String>? extensions,
+}) async {
+  return const [];
+}

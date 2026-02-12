@@ -14,11 +14,14 @@ import '../data/seed_data.dart';
 import '../models/collection_models.dart';
 import '../models/entry_menu_action.dart';
 import '../models/playback_models.dart';
+import '../models/story_content.dart';
 import '../services/app_prefs.dart';
 import '../services/library_storage.dart';
+import '../theme/app_theme.dart';
 import '../ui/collection_type_ui.dart';
 import '../utils/local_fs.dart';
 import '../utils/object_url.dart';
+import '../widgets/graffiti_backdrop.dart';
 import '../widgets/floating_nav_bar.dart';
 import '../widgets/graffiti_scaffold.dart';
 import '../widgets/mini_player_bar.dart';
@@ -29,13 +32,22 @@ import 'now_playing_page.dart';
 import 'splash_catalog_page.dart';
 
 class HomeShell extends StatefulWidget {
-  const HomeShell({super.key});
+  const HomeShell({
+    super.key,
+    required this.onThemeSettingsChanged,
+    required this.initialThemeSettings,
+  });
+
+  final ValueChanged<AppThemeSettings> onThemeSettingsChanged;
+  final AppThemeSettings initialThemeSettings;
 
   @override
   State<HomeShell> createState() => _HomeShellState();
 }
 
 enum _HomeTab { albums, singles, features, playlist, story, launch }
+
+enum _SongImportSource { files, folder }
 
 class _HomeShellState extends State<HomeShell> {
   final AudioPlayer _audioPlayer = AudioPlayer();
@@ -45,16 +57,17 @@ class _HomeShellState extends State<HomeShell> {
   final Set<String> _ownedObjectUrls = {};
   final ValueNotifier<Track?> _currentTrackListenable = ValueNotifier(null);
   final ValueNotifier<String?> _pendingTrackIdListenable = ValueNotifier(null);
-  final ValueNotifier<List<Track>> _queueListenable =
-      ValueNotifier(const []);
-  final ValueNotifier<bool> _shuffleEnabledListenable =
-      ValueNotifier(false);
-  final ValueNotifier<RepeatMode> _repeatModeListenable =
-      ValueNotifier(RepeatMode.off);
-  final ValueNotifier<Duration> _positionListenable =
-      ValueNotifier(Duration.zero);
-  final ValueNotifier<Duration> _durationListenable =
-      ValueNotifier(Duration.zero);
+  final ValueNotifier<List<Track>> _queueListenable = ValueNotifier(const []);
+  final ValueNotifier<bool> _shuffleEnabledListenable = ValueNotifier(false);
+  final ValueNotifier<RepeatMode> _repeatModeListenable = ValueNotifier(
+    RepeatMode.off,
+  );
+  final ValueNotifier<Duration> _positionListenable = ValueNotifier(
+    Duration.zero,
+  );
+  final ValueNotifier<Duration> _durationListenable = ValueNotifier(
+    Duration.zero,
+  );
 
   AudioSession? _audioSession;
   StreamSubscription<AudioInterruptionEvent>? _audioInterruptionSub;
@@ -65,6 +78,7 @@ class _HomeShellState extends State<HomeShell> {
   StreamSubscription<PlayerState>? _playerStateSub;
   StreamSubscription<Duration>? _positionSub;
   StreamSubscription<Duration?>? _durationSub;
+  StreamSubscription<int?>? _currentIndexSub;
 
   int _tabIndex = 0;
   int _previousTabIndex = 0;
@@ -73,7 +87,6 @@ class _HomeShellState extends State<HomeShell> {
   Track? _currentTrack;
   String? _currentEntryId;
   bool _isPlaying = false;
-  bool _isAutoAdvancing = false;
   bool _miniPlayerExpanded = true;
   bool _shuffleEnabled = false;
   RepeatMode _repeatMode = RepeatMode.off;
@@ -82,11 +95,16 @@ class _HomeShellState extends State<HomeShell> {
   List<_RecentPlayPointer> _recentPlays = const [];
   ProcessingState _processingState = ProcessingState.idle;
   Duration _position = Duration.zero;
-  Duration _duration = Duration.zero;
+  late AppThemeSettings _themeSettings;
+  bool _isEditMode = false;
+  List<String> _customBackdropSources = const [];
+  StoryContent _storyContent = StoryContent.defaults();
 
   @override
   void initState() {
     super.initState();
+    _themeSettings = widget.initialThemeSettings;
+    GraffitiBackdrop.setCustomSources(_customBackdropSources);
     unawaited(_initAudioSession());
     unawaited(_hydrateLibrary());
     unawaited(_hydratePrefs());
@@ -104,9 +122,6 @@ class _HomeShellState extends State<HomeShell> {
           _pendingTrackIdListenable.value = null;
         }
       });
-      if (processing == ProcessingState.completed) {
-        unawaited(_handleAutoAdvanceIfNeeded());
-      }
     });
     _positionSub = _audioPlayer.positionStream.listen((position) {
       if (!mounted) {
@@ -120,6 +135,9 @@ class _HomeShellState extends State<HomeShell> {
       }
       _setPlaybackDuration(duration ?? Duration.zero);
     });
+    _currentIndexSub = _audioPlayer.currentIndexStream.listen(
+      _syncCurrentTrackFromQueueIndex,
+    );
   }
 
   @override
@@ -139,6 +157,7 @@ class _HomeShellState extends State<HomeShell> {
     _playerStateSub?.cancel();
     _positionSub?.cancel();
     _durationSub?.cancel();
+    _currentIndexSub?.cancel();
     _audioPlayer.dispose();
     super.dispose();
   }
@@ -156,6 +175,28 @@ class _HomeShellState extends State<HomeShell> {
       tracks.addAll(entry.tracks);
     }
     return tracks;
+  }
+
+  List<Track> _singleTracksByIds(List<String> ids) {
+    if (ids.isEmpty) {
+      return const [];
+    }
+    final selected = <Track>[];
+    final wanted = ids.toSet();
+    for (final entry in _entries) {
+      if (entry.type != CollectionType.single) {
+        continue;
+      }
+      for (final track in entry.tracks) {
+        if (wanted.remove(track.id)) {
+          selected.add(track);
+        }
+      }
+      if (wanted.isEmpty) {
+        break;
+      }
+    }
+    return selected;
   }
 
   CollectionEntry? _entryById(String id) {
@@ -206,10 +247,7 @@ class _HomeShellState extends State<HomeShell> {
       ..removeWhere(
         (item) => item.entryId == entryId && item.trackId == trackId,
       )
-      ..insert(
-        0,
-        _RecentPlayPointer(entryId: entryId, trackId: trackId),
-      );
+      ..insert(0, _RecentPlayPointer(entryId: entryId, trackId: trackId));
     const maxItems = 40;
     if (next.length > maxItems) {
       next.removeRange(maxItems, next.length);
@@ -224,11 +262,7 @@ class _HomeShellState extends State<HomeShell> {
     return '${DateTime.now().microsecondsSinceEpoch}_${_random.nextInt(99999)}';
   }
 
-  void _logError(
-    String contextLabel,
-    Object error,
-    StackTrace stackTrace,
-  ) {
+  void _logError(String contextLabel, Object error, StackTrace stackTrace) {
     debugPrint('[$contextLabel] $error');
     debugPrintStack(stackTrace: stackTrace);
   }
@@ -239,7 +273,6 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   void _setPlaybackDuration(Duration value) {
-    _duration = value;
     _durationListenable.value = value;
   }
 
@@ -279,13 +312,27 @@ class _HomeShellState extends State<HomeShell> {
     }
     final showStory = prefs['showStoryTab'];
     final showLaunch = prefs['showLaunchTab'];
+    final editMode = prefs['editMode'];
+    final customBackdropSources = _parseStringList(
+      prefs['customBackdropSources'],
+    );
+    final themeSettings = _normalizedThemeSettings(
+      AppThemeSettings.fromJson(prefs['themeSettings']),
+    );
+    final storyContent = StoryContent.fromJson(prefs['storyContent']);
     final recentPlays = _parseRecentPlays(prefs['recentPlays']);
     setState(() {
       _showStoryTab = showStory is bool ? showStory : true;
       _showLaunchTab = showLaunch is bool ? showLaunch : true;
+      _isEditMode = editMode is bool ? editMode : false;
+      _customBackdropSources = customBackdropSources;
+      _themeSettings = themeSettings;
+      _storyContent = storyContent;
       _recentPlays = recentPlays;
       _clampTabIndex();
     });
+    GraffitiBackdrop.setCustomSources(customBackdropSources);
+    widget.onThemeSettingsChanged(themeSettings);
   }
 
   List<_RecentPlayPointer> _parseRecentPlays(Object? raw) {
@@ -307,6 +354,32 @@ class _HomeShellState extends State<HomeShell> {
     return parsed;
   }
 
+  List<String> _parseStringList(Object? raw) {
+    if (raw is! List) {
+      return const [];
+    }
+    return raw
+        .map((item) => item.toString().trim())
+        .where((item) => item.isNotEmpty)
+        .toList();
+  }
+
+  AppThemeSettings _normalizedThemeSettings(AppThemeSettings settings) {
+    final validDisplay = AppTheme.displayFontChoices.any(
+      (item) => item.key == settings.displayFontKey,
+    );
+    final validBody = AppTheme.bodyFontChoices.any(
+      (item) => item.key == settings.bodyFontKey,
+    );
+    const defaults = AppThemeSettings();
+    return settings.copyWith(
+      displayFontKey: validDisplay
+          ? settings.displayFontKey
+          : defaults.displayFontKey,
+      bodyFontKey: validBody ? settings.bodyFontKey : defaults.bodyFontKey,
+    );
+  }
+
   Future<void> _persistLibrary() async {
     final success = await _libraryStorage.save(_entries);
     if (!success) {
@@ -318,6 +391,10 @@ class _HomeShellState extends State<HomeShell> {
     final success = await _prefs.save({
       'showStoryTab': _showStoryTab,
       'showLaunchTab': _showLaunchTab,
+      'editMode': _isEditMode,
+      'customBackdropSources': _customBackdropSources,
+      'themeSettings': _themeSettings.toJson(),
+      'storyContent': _storyContent.toJson(),
       'recentPlays': _recentPlays.map((item) => item.toJson()).toList(),
     });
     if (!success && notifyOnFailure) {
@@ -354,6 +431,7 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   void _setShuffleEnabled(bool enabled) {
+    final changed = _shuffleEnabled != enabled;
     setState(() {
       _shuffleEnabled = enabled;
       _shuffleEnabledListenable.value = enabled;
@@ -371,21 +449,243 @@ class _HomeShellState extends State<HomeShell> {
       }
       _refreshQueueForCurrentEntry();
     });
+    if (changed) {
+      unawaited(_rebuildCurrentAudioSourcePreservingTrack());
+    }
   }
 
   void _cycleRepeatMode() {
     setState(() {
-      final nextIndex = (RepeatMode.values.indexOf(_repeatMode) + 1) %
+      final nextIndex =
+          (RepeatMode.values.indexOf(_repeatMode) + 1) %
           RepeatMode.values.length;
       _repeatMode = RepeatMode.values[nextIndex];
       _repeatModeListenable.value = _repeatMode;
     });
+    unawaited(_applyPlayerLoopMode());
+  }
+
+  LoopMode _loopModeForRepeatMode(RepeatMode mode) {
+    switch (mode) {
+      case RepeatMode.off:
+        return LoopMode.off;
+      case RepeatMode.all:
+        return LoopMode.all;
+      case RepeatMode.one:
+        return LoopMode.one;
+    }
+  }
+
+  Future<void> _applyPlayerLoopMode() async {
+    try {
+      await _audioPlayer.setLoopMode(_loopModeForRepeatMode(_repeatMode));
+    } catch (error, stackTrace) {
+      _logError('applyPlayerLoopMode', error, stackTrace);
+    }
   }
 
   void _toggleMiniPlayerSize() {
     setState(() {
       _miniPlayerExpanded = !_miniPlayerExpanded;
     });
+  }
+
+  void _setEditMode(bool enabled) {
+    if (_isEditMode == enabled) {
+      return;
+    }
+    setState(() {
+      _isEditMode = enabled;
+    });
+    unawaited(_persistPrefs());
+  }
+
+  void _applyThemeSettings(AppThemeSettings next, {bool persist = true}) {
+    final normalized = _normalizedThemeSettings(next);
+    final changed =
+        _themeSettings.primaryColorValue != normalized.primaryColorValue ||
+        _themeSettings.secondaryColorValue != normalized.secondaryColorValue ||
+        _themeSettings.backgroundColorValue !=
+            normalized.backgroundColorValue ||
+        _themeSettings.displayFontKey != normalized.displayFontKey ||
+        _themeSettings.bodyFontKey != normalized.bodyFontKey;
+    if (!changed) {
+      return;
+    }
+    setState(() {
+      _themeSettings = normalized;
+    });
+    widget.onThemeSettingsChanged(normalized);
+    if (persist) {
+      unawaited(_persistPrefs());
+    }
+  }
+
+  Future<void> _openThemeEditor() async {
+    if (!_isEditMode) {
+      _showMessage('Enter Edit Mode to customize fonts and colors.');
+      return;
+    }
+    final next = await showDialog<AppThemeSettings>(
+      context: context,
+      builder: (context) {
+        return _ThemeEditorDialog(initialSettings: _themeSettings);
+      },
+    );
+    if (!mounted || next == null) {
+      return;
+    }
+    _applyThemeSettings(next);
+    _showMessage('Appearance updated.');
+  }
+
+  Future<String?> _backgroundImageLibraryDirPath() async {
+    if (kIsWeb) {
+      return null;
+    }
+    return ensureAppSubdirectory('background_images');
+  }
+
+  String _imageMimeTypeForFileName(String fileName) {
+    final extension = path.extension(fileName).toLowerCase();
+    switch (extension) {
+      case '.png':
+        return 'image/png';
+      case '.gif':
+        return 'image/gif';
+      case '.webp':
+        return 'image/webp';
+      case '.bmp':
+        return 'image/bmp';
+      case '.svg':
+        return 'image/svg+xml';
+      case '.jpg':
+      case '.jpeg':
+      default:
+        return 'image/jpeg';
+    }
+  }
+
+  Future<String?> _persistBackdropImageFile(PlatformFile file) async {
+    final sourcePath = file.path?.trim() ?? '';
+    if (kIsWeb) {
+      if (file.bytes != null && file.bytes!.isNotEmpty) {
+        final mimeType = _imageMimeTypeForFileName(file.name);
+        return 'data:$mimeType;base64,${base64Encode(file.bytes!)}';
+      }
+      return sourcePath.isEmpty ? null : sourcePath;
+    }
+
+    if (sourcePath.isEmpty) {
+      return null;
+    }
+    final uri = _audioUriFromPath(sourcePath);
+    if (uri != null && uri.scheme != 'file') {
+      return sourcePath;
+    }
+    final sourceFilePath = uri == null ? sourcePath : localFilePathFromUri(uri);
+    if (!await localFileExists(sourceFilePath)) {
+      return null;
+    }
+
+    final backgroundDir = await _backgroundImageLibraryDirPath();
+    if (backgroundDir == null) {
+      return sourceFilePath;
+    }
+    if (path.isWithin(backgroundDir, sourceFilePath)) {
+      return sourceFilePath;
+    }
+
+    final extension = path.extension(sourceFilePath);
+    final targetPath = path.join(
+      backgroundDir,
+      '${_newId()}${extension.isEmpty ? '.jpg' : extension}',
+    );
+    try {
+      final copied = await copyLocalFileToPath(
+        sourcePath: sourceFilePath,
+        targetPath: targetPath,
+      );
+      return copied ?? sourceFilePath;
+    } catch (error, stackTrace) {
+      _logError('persistBackdropImageFile', error, stackTrace);
+      return null;
+    }
+  }
+
+  Future<void> _uploadBackdropImages() async {
+    if (!_isEditMode) {
+      _showMessage('Enter Edit Mode before uploading background images.');
+      return;
+    }
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.image,
+      allowMultiple: true,
+      withData: kIsWeb,
+    );
+    if (result == null || result.files.isEmpty) {
+      return;
+    }
+
+    final sources = <String>[];
+    for (final file in result.files) {
+      final persisted = await _persistBackdropImageFile(file);
+      if (persisted != null && persisted.isNotEmpty) {
+        sources.add(persisted);
+      }
+    }
+    if (sources.isEmpty) {
+      _showMessage('No valid images selected.');
+      return;
+    }
+
+    final next = [..._customBackdropSources];
+    for (final source in sources) {
+      if (!next.contains(source)) {
+        next.add(source);
+      }
+    }
+
+    setState(() {
+      _customBackdropSources = next;
+    });
+    GraffitiBackdrop.setCustomSources(next);
+    unawaited(_persistPrefs());
+    _showMessage('${sources.length} background image(s) added.');
+  }
+
+  void _resetBackdropImages() {
+    if (!_isEditMode) {
+      _showMessage('Enter Edit Mode before editing backgrounds.');
+      return;
+    }
+    setState(() {
+      _customBackdropSources = const [];
+    });
+    GraffitiBackdrop.setCustomSources(const []);
+    unawaited(_persistPrefs());
+    _showMessage('Background images reset to default.');
+  }
+
+  Future<void> _openStoryEditor() async {
+    if (!_isEditMode) {
+      _showMessage('Enter Edit Mode before editing Story.');
+      return;
+    }
+    final next = await showDialog<StoryContent>(
+      context: context,
+      builder: (context) {
+        return _StoryEditorDialog(initialContent: _storyContent);
+      },
+    );
+    if (!mounted || next == null) {
+      return;
+    }
+    setState(() {
+      _storyContent = next;
+    });
+    unawaited(_persistPrefs());
+    _showMessage('Story updated.');
   }
 
   Future<bool> _confirmDelete({
@@ -415,10 +715,7 @@ class _HomeShellState extends State<HomeShell> {
     return confirmed == true;
   }
 
-  Future<void> _showTrackDetails(
-    Track track, {
-    CollectionEntry? entry,
-  }) async {
+  Future<void> _showTrackDetails(Track track, {CollectionEntry? entry}) async {
     if (!mounted) {
       return;
     }
@@ -470,10 +767,7 @@ class _HomeShellState extends State<HomeShell> {
                 if (filePath.isNotEmpty) ...[
                   const SizedBox(height: 12),
                   Text('File', style: textTheme.labelLarge),
-                  SelectableText(
-                    filePath,
-                    maxLines: 2,
-                  ),
+                  SelectableText(filePath, maxLines: 2),
                 ],
                 const SizedBox(height: 16),
                 Align(
@@ -496,8 +790,7 @@ class _HomeShellState extends State<HomeShell> {
     if (track == null) {
       return;
     }
-    final entry =
-        _currentEntryId == null ? null : _entryById(_currentEntryId!);
+    final entry = _currentEntryId == null ? null : _entryById(_currentEntryId!);
     await Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => NowPlayingPage(
@@ -584,10 +877,7 @@ class _HomeShellState extends State<HomeShell> {
     await _playTrackFromEntry(track, entry);
   }
 
-  Future<void> _playTrackFromEntry(
-    Track track,
-    CollectionEntry entry,
-  ) async {
+  Future<void> _playTrackFromEntry(Track track, CollectionEntry entry) async {
     await _playTrack(track, entryId: entry.id);
   }
 
@@ -836,6 +1126,7 @@ class _HomeShellState extends State<HomeShell> {
         return 'Launch';
     }
   }
+
   void _showMessage(String message) {
     if (!mounted) {
       return;
@@ -874,6 +1165,34 @@ class _HomeShellState extends State<HomeShell> {
       return null;
     }
     return Uri.file(thumbnailPath);
+  }
+
+  MediaItem _mediaItemForTrack(Track track, {CollectionEntry? entry}) {
+    return MediaItem(
+      id: track.id,
+      title: track.title,
+      artist: track.artist,
+      album: entry?.title ?? entry?.type.label,
+      artUri: _notificationArtUriForEntry(entry),
+    );
+  }
+
+  AudioSource _buildAudioSourceForTrack(Track track, {CollectionEntry? entry}) {
+    final rawPath = track.filePath.trim();
+    final sourceUri = _audioUriFromPath(rawPath) ?? Uri.file(rawPath);
+    return AudioSource.uri(
+      sourceUri,
+      tag: _mediaItemForTrack(track, entry: entry),
+    );
+  }
+
+  List<AudioSource> _buildAudioSourcesForQueue(
+    List<Track> queue, {
+    required CollectionEntry entry,
+  }) {
+    return [
+      for (final item in queue) _buildAudioSourceForTrack(item, entry: entry),
+    ];
   }
 
   Future<String?> _persistAudioFile(PlatformFile file) async {
@@ -961,66 +1280,9 @@ class _HomeShellState extends State<HomeShell> {
     });
     if (_currentEntryId == updated.id) {
       _refreshQueueForEntry(updated);
+      unawaited(_rebuildCurrentAudioSourcePreservingTrack());
     }
     unawaited(_persistLibrary());
-  }
-
-  Future<void> _handleAutoAdvanceIfNeeded() async {
-    if (!mounted || _isAutoAdvancing) {
-      return;
-    }
-    final entryId = _currentEntryId;
-    final current = _currentTrack;
-    if (entryId == null || current == null) {
-      return;
-    }
-
-    final entry = _entryById(entryId);
-    if (entry == null) {
-      return;
-    }
-    if (entry.type != CollectionType.album &&
-        entry.type != CollectionType.playlist) {
-      return;
-    }
-    if (entry.tracks.isEmpty) {
-      return;
-    }
-
-    _isAutoAdvancing = true;
-    try {
-      if (_repeatMode == RepeatMode.one) {
-        await _audioPlayer.seek(Duration.zero);
-        await _audioPlayer.play();
-        return;
-      }
-
-      Track? next;
-      if (_shuffleEnabled) {
-        _ensureShuffleQueue(entry);
-        final idx = _shuffleQueue.indexOf(current.id);
-        if (idx >= 0 && idx < _shuffleQueue.length - 1) {
-          next = _trackById(entry, _shuffleQueue[idx + 1]);
-        } else if (_repeatMode == RepeatMode.all &&
-            _shuffleQueue.isNotEmpty) {
-          next = _trackById(entry, _shuffleQueue.first);
-        }
-      } else {
-        final index =
-            entry.tracks.indexWhere((track) => track.id == current.id);
-        if (index >= 0 && index < entry.tracks.length - 1) {
-          next = entry.tracks[index + 1];
-        } else if (_repeatMode == RepeatMode.all) {
-          next = entry.tracks.first;
-        }
-      }
-
-      if (next != null) {
-        await _playTrack(next, entryId: entry.id);
-      }
-    } finally {
-      _isAutoAdvancing = false;
-    }
   }
 
   void _ensureShuffleQueue(CollectionEntry entry) {
@@ -1032,7 +1294,9 @@ class _HomeShellState extends State<HomeShell> {
     final isSameEntry = _shuffleQueueEntryId == entry.id;
     final isSameLength = _shuffleQueue.length == trackIds.length;
     final matches =
-        isSameEntry && isSameLength && _shuffleQueue.toSet().containsAll(trackIdSet);
+        isSameEntry &&
+        isSameLength &&
+        _shuffleQueue.toSet().containsAll(trackIdSet);
     if (matches) {
       return;
     }
@@ -1073,6 +1337,71 @@ class _HomeShellState extends State<HomeShell> {
     _refreshQueueForEntry(entry);
   }
 
+  void _syncCurrentTrackFromQueueIndex(int? index) {
+    if (!mounted || index == null || index < 0) {
+      return;
+    }
+    final queue = _queueListenable.value;
+    if (index >= queue.length) {
+      return;
+    }
+
+    final nextTrack = queue[index];
+    if (_currentTrack?.id == nextTrack.id) {
+      return;
+    }
+
+    setState(() {
+      _currentTrack = nextTrack;
+      _currentTrackListenable.value = nextTrack;
+    });
+    _pendingTrackIdListenable.value = null;
+    final entryId = _currentEntryId;
+    if (entryId != null) {
+      _rememberRecentlyPlayed(entryId: entryId, trackId: nextTrack.id);
+    }
+  }
+
+  Future<void> _rebuildCurrentAudioSourcePreservingTrack() async {
+    final entryId = _currentEntryId;
+    final current = _currentTrack;
+    if (entryId == null || current == null) {
+      return;
+    }
+    final entry = _entryById(entryId);
+    if (entry == null || entry.tracks.isEmpty) {
+      return;
+    }
+
+    final queue = _queueForEntry(entry);
+    if (queue.isEmpty) {
+      return;
+    }
+    _queueListenable.value = queue;
+    final targetIndex = queue.indexWhere((track) => track.id == current.id);
+    if (targetIndex < 0) {
+      return;
+    }
+
+    final sources = _buildAudioSourcesForQueue(queue, entry: entry);
+    final resumePosition = _position;
+    final resumePlayback = _isPlaying;
+    try {
+      await _audioPlayer.setAudioSources(
+        sources,
+        initialIndex: targetIndex,
+        initialPosition: resumePosition,
+      );
+      await _applyPlayerLoopMode();
+      if (resumePlayback) {
+        await _audioSession?.setActive(true);
+        await _audioPlayer.play();
+      }
+    } catch (error, stackTrace) {
+      _logError('rebuildCurrentAudioSource', error, stackTrace);
+    }
+  }
+
   Future<void> _playTrack(Track track, {String? entryId}) async {
     final rawPath = track.filePath.trim();
     if (rawPath.isEmpty) {
@@ -1083,24 +1412,28 @@ class _HomeShellState extends State<HomeShell> {
     final uri = _audioUriFromPath(rawPath);
     if (!kIsWeb) {
       if (uri == null && !localFileExistsSync(rawPath)) {
-        _showMessage('Track file not found. Upload a local file for this song.');
+        _showMessage(
+          'Track file not found. Upload a local file for this song.',
+        );
         return;
       }
       if (uri?.scheme == 'file' && !localFileUriExistsSync(uri!)) {
-        _showMessage('Track file not found. Upload a local file for this song.');
+        _showMessage(
+          'Track file not found. Upload a local file for this song.',
+        );
         return;
       }
     }
 
+    final nextEntryId = entryId ?? _currentEntryId;
     try {
-      if (_currentTrack?.id == track.id) {
+      if (_currentTrack?.id == track.id && _currentEntryId == nextEntryId) {
         if (!_isPlaying) {
+          await _audioSession?.setActive(true);
           await _audioPlayer.play();
         }
         return;
       }
-
-      final nextEntryId = entryId ?? _currentEntryId;
 
       // Immediate feedback: show the mini-player context and a loading state.
       setState(() {
@@ -1110,26 +1443,31 @@ class _HomeShellState extends State<HomeShell> {
       });
       _resetPlaybackProgress();
       _pendingTrackIdListenable.value = track.id;
-      if (nextEntryId != null) {
-        final entry = _entryById(nextEntryId);
-        if (entry != null) {
-          _refreshQueueForEntry(entry);
-        }
-      }
-
       final entry = nextEntryId == null ? null : _entryById(nextEntryId);
-      final mediaItem = MediaItem(
-        id: track.id,
-        title: track.title,
-        artist: track.artist,
-        album: entry?.title ?? entry?.type.label,
-        artUri: _notificationArtUriForEntry(entry),
-      );
-      final sourceUri = uri ?? Uri.file(rawPath);
       await _audioSession?.setActive(true);
-      await _audioPlayer.setAudioSource(
-        AudioSource.uri(sourceUri, tag: mediaItem),
-      );
+      if (entry != null && entry.tracks.isNotEmpty) {
+        final queue = _queueForEntry(entry);
+        final effectiveQueue = queue.isEmpty ? [track] : queue;
+        _queueListenable.value = effectiveQueue;
+        final currentIndex = effectiveQueue.indexWhere(
+          (item) => item.id == track.id,
+        );
+        final sources = _buildAudioSourcesForQueue(
+          effectiveQueue,
+          entry: entry,
+        );
+        await _audioPlayer.setAudioSources(
+          sources,
+          initialIndex: currentIndex < 0 ? 0 : currentIndex,
+          initialPosition: Duration.zero,
+        );
+      } else {
+        _queueListenable.value = [track];
+        await _audioPlayer.setAudioSource(
+          _buildAudioSourceForTrack(track, entry: entry),
+        );
+      }
+      await _applyPlayerLoopMode();
       await _audioPlayer.play();
       if (nextEntryId != null) {
         _rememberRecentlyPlayed(entryId: nextEntryId, trackId: track.id);
@@ -1167,104 +1505,49 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   Future<void> _playNextInEntry() async {
-    final entryId = _currentEntryId;
-    final current = _currentTrack;
-    if (entryId == null || current == null) {
+    final queue = _queueListenable.value;
+    if (queue.isEmpty) {
       return;
     }
-    final entry = _entryById(entryId);
-    if (entry == null || entry.tracks.length < 2) {
+    final currentIndex =
+        _audioPlayer.currentIndex ??
+        queue.indexWhere((track) => track.id == _currentTrack?.id);
+    if (currentIndex < 0) {
       return;
     }
-    if (_shuffleEnabled) {
-      _ensureShuffleQueue(entry);
-      final idx = _shuffleQueue.indexOf(current.id);
-      if (idx >= 0 && idx < _shuffleQueue.length - 1) {
-        final next = _trackById(entry, _shuffleQueue[idx + 1]);
-        if (next != null) {
-          await _playTrack(next, entryId: entry.id);
-        }
-        return;
-      }
-      if (_repeatMode == RepeatMode.all && _shuffleQueue.isNotEmpty) {
-        final next = _trackById(entry, _shuffleQueue.first);
-        if (next != null) {
-          await _playTrack(next, entryId: entry.id);
-        }
-      }
-      return;
-    }
-
-    final index = entry.tracks.indexWhere((track) => track.id == current.id);
-    if (index < 0) {
-      return;
-    }
-    if (index < entry.tracks.length - 1) {
-      await _playTrack(entry.tracks[index + 1], entryId: entry.id);
+    if (currentIndex < queue.length - 1) {
+      await _audioPlayer.seek(Duration.zero, index: currentIndex + 1);
       return;
     }
     if (_repeatMode == RepeatMode.all) {
-      await _playTrack(entry.tracks.first, entryId: entry.id);
+      await _audioPlayer.seek(Duration.zero, index: 0);
     }
   }
 
   Future<void> _playPreviousInEntry() async {
-    final entryId = _currentEntryId;
-    final current = _currentTrack;
-    if (entryId == null || current == null) {
+    final queue = _queueListenable.value;
+    if (queue.isEmpty) {
       return;
     }
     if (_position > const Duration(seconds: 3)) {
       await _seekTo(Duration.zero);
       return;
     }
-    final entry = _entryById(entryId);
-    if (entry == null || entry.tracks.isEmpty) {
+    final currentIndex =
+        _audioPlayer.currentIndex ??
+        queue.indexWhere((track) => track.id == _currentTrack?.id);
+    if (currentIndex < 0) {
       return;
     }
-    if (_shuffleEnabled) {
-      _ensureShuffleQueue(entry);
-      final idx = _shuffleQueue.indexOf(current.id);
-      if (idx > 0) {
-        final prev = _trackById(entry, _shuffleQueue[idx - 1]);
-        if (prev != null) {
-          await _playTrack(prev, entryId: entry.id);
-        }
-        return;
-      }
-      if (_repeatMode == RepeatMode.all && _shuffleQueue.isNotEmpty) {
-        final prev = _trackById(entry, _shuffleQueue.last);
-        if (prev != null) {
-          await _playTrack(prev, entryId: entry.id);
-        }
-        return;
-      }
-      await _seekTo(Duration.zero);
-      return;
-    }
-
-    final index = entry.tracks.indexWhere((track) => track.id == current.id);
-    if (index > 0) {
-      await _playTrack(entry.tracks[index - 1], entryId: entry.id);
+    if (currentIndex > 0) {
+      await _audioPlayer.seek(Duration.zero, index: currentIndex - 1);
       return;
     }
     if (_repeatMode == RepeatMode.all) {
-      await _playTrack(entry.tracks.last, entryId: entry.id);
+      await _audioPlayer.seek(Duration.zero, index: queue.length - 1);
       return;
     }
     await _seekTo(Duration.zero);
-  }
-
-  Future<void> _seekBySeconds(int seconds) async {
-    final target = _position + Duration(seconds: seconds);
-    if (_duration == Duration.zero) {
-      await _seekTo(target < Duration.zero ? Duration.zero : target);
-      return;
-    }
-    final clamped = target < Duration.zero
-        ? Duration.zero
-        : (target > _duration ? _duration : target);
-    await _seekTo(clamped);
   }
 
   Future<void> _reorderEntryTracks(
@@ -1299,9 +1582,9 @@ class _HomeShellState extends State<HomeShell> {
 
     final selected = result.files.first;
     final thumbPath = selected.path?.trim();
-    final shouldStoreBase64 =
-        kIsWeb || thumbPath == null || thumbPath.isEmpty;
-    final thumbData = shouldStoreBase64 &&
+    final shouldStoreBase64 = kIsWeb || thumbPath == null || thumbPath.isEmpty;
+    final thumbData =
+        shouldStoreBase64 &&
             selected.bytes != null &&
             selected.bytes!.isNotEmpty
         ? base64Encode(selected.bytes!)
@@ -1331,16 +1614,12 @@ class _HomeShellState extends State<HomeShell> {
       return null;
     }
 
-    final result = await FilePicker.platform.pickFiles(
-      type: FileType.audio,
-      allowMultiple: true,
-      withData: kIsWeb,
-    );
-    if (result == null || result.files.isEmpty) {
+    final files = await _pickAudioPlatformFiles();
+    if (files.isEmpty) {
       return null;
     }
 
-    final tracks = await _tracksFromFiles(result.files, artist: 'J. Cole');
+    final tracks = await _tracksFromFiles(files, artist: 'J. Cole');
     if (tracks.isEmpty) {
       _showMessage('No valid audio files selected.');
       return null;
@@ -1350,6 +1629,100 @@ class _HomeShellState extends State<HomeShell> {
     _replaceEntry(updated);
     _showMessage('${tracks.length} song(s) added to ${updated.title}.');
     return updated;
+  }
+
+  Future<_SongImportSource?> _pickSongImportSource() async {
+    if (kIsWeb) {
+      return _SongImportSource.files;
+    }
+    return showModalBottomSheet<_SongImportSource>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const ListTile(
+                title: Text('Import Songs'),
+                subtitle: Text('Choose files or a folder'),
+              ),
+              ListTile(
+                leading: const Icon(Icons.audio_file_outlined),
+                title: const Text('Pick Audio Files'),
+                onTap: () => Navigator.pop(context, _SongImportSource.files),
+              ),
+              ListTile(
+                leading: const Icon(Icons.folder_open),
+                title: const Text('Pick Folder'),
+                subtitle: const Text(
+                  'Detects songs recursively and supports bulk selection',
+                ),
+                onTap: () => Navigator.pop(context, _SongImportSource.folder),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Future<List<PlatformFile>> _pickAudioPlatformFiles() async {
+    final source = await _pickSongImportSource();
+    if (source == null) {
+      return const [];
+    }
+
+    if (source == _SongImportSource.files) {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.audio,
+        allowMultiple: true,
+        withData: kIsWeb,
+      );
+      return result?.files ?? const [];
+    }
+
+    try {
+      final directoryPath = await FilePicker.platform.getDirectoryPath(
+        dialogTitle: 'Select Music Folder',
+      );
+      if (directoryPath == null || directoryPath.trim().isEmpty) {
+        return const [];
+      }
+      final normalizedDirectoryPath = _normalizeDirectoryPathForListing(
+        directoryPath,
+      );
+      if (normalizedDirectoryPath == null) {
+        return const [];
+      }
+      final filePaths = await listAudioFilesRecursively(
+        normalizedDirectoryPath,
+      );
+      if (filePaths.isEmpty) {
+        _showMessage('No supported audio files found in selected folder.');
+        return const [];
+      }
+      if (!mounted) {
+        return const [];
+      }
+      final selectedPaths = await _showFolderAudioBulkPicker(
+        context: context,
+        rootDirectory: normalizedDirectoryPath,
+        filePaths: filePaths,
+        title: 'Select Songs To Upload',
+      );
+      if (selectedPaths == null || selectedPaths.isEmpty) {
+        if (selectedPaths != null) {
+          _showMessage('No songs selected.');
+        }
+        return const [];
+      }
+      return _platformFilesFromPaths(selectedPaths);
+    } catch (error, stackTrace) {
+      _logError('pickAudioPlatformFiles', error, stackTrace);
+      _showMessage('Could not import folder audio files.');
+      return const [];
+    }
   }
 
   Future<void> _uploadSongsToTypeCollection(CollectionType type) async {
@@ -1393,10 +1766,16 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   Future<void> _createCollection(CollectionType type) async {
+    final availableSingleTracks = type == CollectionType.playlist
+        ? _allSingleTracks()
+        : const <Track>[];
     final draft = await showDialog<_NewCollectionDraft>(
       context: context,
       builder: (context) {
-        return _CreateCollectionDialog(type: type);
+        return _CreateCollectionDialog(
+          type: type,
+          availableSingleTracks: availableSingleTracks,
+        );
       },
     );
 
@@ -1412,9 +1791,10 @@ class _HomeShellState extends State<HomeShell> {
       return;
     }
 
-    final effectiveTracks = tracks.isEmpty && type == CollectionType.playlist
-        ? _allSingleTracks()
-        : tracks;
+    final fromSingles = type == CollectionType.playlist
+        ? _singleTracksByIds(draft.selectedSingleTrackIds)
+        : const <Track>[];
+    final effectiveTracks = [...fromSingles, ...tracks];
 
     final created = CollectionEntry(
       id: _newId(),
@@ -1431,8 +1811,10 @@ class _HomeShellState extends State<HomeShell> {
       _entries = [..._entries, created];
     });
     unawaited(_persistLibrary());
-    if (tracks.isEmpty && type == CollectionType.playlist) {
-      _showMessage('${created.title} created from singles.');
+    if (type == CollectionType.playlist && fromSingles.isNotEmpty) {
+      _showMessage(
+        '${created.title} added with ${fromSingles.length} single(s).',
+      );
     } else {
       _showMessage('${created.title} added.');
     }
@@ -1526,75 +1908,78 @@ class _HomeShellState extends State<HomeShell> {
     final currentTab = tabs[effectiveIndex];
     final page = switch (currentTab) {
       _HomeTab.albums => LibraryPage(
-          key: const ValueKey('albums'),
-          tabType: CollectionType.album,
-          entries: _ofType(CollectionType.album),
-          recentTracks: _recentTracksForType(CollectionType.album),
-          onOpen: _openDetail,
-          onPlayRecentTrack: _playTrackFromEntry,
-          onCreateCollection: () => _createCollection(CollectionType.album),
-          onUploadToCollection: () =>
-              _uploadSongsToTypeCollection(CollectionType.album),
-          onPlayAll: () => _playFromType(CollectionType.album, shuffle: false),
-          onShufflePlay: () =>
-              _playFromType(CollectionType.album, shuffle: true),
-          onMenuAction: _runMenuAction,
-        ),
+        key: const ValueKey('albums'),
+        tabType: CollectionType.album,
+        entries: _ofType(CollectionType.album),
+        recentTracks: _recentTracksForType(CollectionType.album),
+        onOpen: _openDetail,
+        onPlayRecentTrack: _playTrackFromEntry,
+        onCreateCollection: () => _createCollection(CollectionType.album),
+        onUploadToCollection: () =>
+            _uploadSongsToTypeCollection(CollectionType.album),
+        onPlayAll: () => _playFromType(CollectionType.album, shuffle: false),
+        onShufflePlay: () => _playFromType(CollectionType.album, shuffle: true),
+        onMenuAction: _runMenuAction,
+      ),
       _HomeTab.singles => LibraryPage(
-          key: const ValueKey('singles'),
-          tabType: CollectionType.single,
-          entries: _ofType(CollectionType.single),
-          recentTracks: _recentTracksForType(CollectionType.single),
-          onOpen: _openDetail,
-          onPlayRecentTrack: _playTrackFromEntry,
-          onCreateCollection: () => _createCollection(CollectionType.single),
-          onUploadToCollection: () =>
-              _uploadSongsToTypeCollection(CollectionType.single),
-          onPlayAll: () => _playFromType(CollectionType.single, shuffle: false),
-          onShufflePlay: () =>
-              _playFromType(CollectionType.single, shuffle: true),
-          onMenuAction: _runMenuAction,
-        ),
+        key: const ValueKey('singles'),
+        tabType: CollectionType.single,
+        entries: _ofType(CollectionType.single),
+        recentTracks: _recentTracksForType(CollectionType.single),
+        onOpen: _openDetail,
+        onPlayRecentTrack: _playTrackFromEntry,
+        onCreateCollection: () => _createCollection(CollectionType.single),
+        onUploadToCollection: () =>
+            _uploadSongsToTypeCollection(CollectionType.single),
+        onPlayAll: () => _playFromType(CollectionType.single, shuffle: false),
+        onShufflePlay: () =>
+            _playFromType(CollectionType.single, shuffle: true),
+        onMenuAction: _runMenuAction,
+      ),
       _HomeTab.features => LibraryPage(
-          key: const ValueKey('features'),
-          tabType: CollectionType.feature,
-          entries: _ofType(CollectionType.feature),
-          recentTracks: _recentTracksForType(CollectionType.feature),
-          onOpen: _openDetail,
-          onPlayRecentTrack: _playTrackFromEntry,
-          onCreateCollection: () => _createCollection(CollectionType.feature),
-          onUploadToCollection: () =>
-              _uploadSongsToTypeCollection(CollectionType.feature),
-          onPlayAll: () => _playFromType(CollectionType.feature, shuffle: false),
-          onShufflePlay: () =>
-              _playFromType(CollectionType.feature, shuffle: true),
-          onMenuAction: _runMenuAction,
-        ),
+        key: const ValueKey('features'),
+        tabType: CollectionType.feature,
+        entries: _ofType(CollectionType.feature),
+        recentTracks: _recentTracksForType(CollectionType.feature),
+        onOpen: _openDetail,
+        onPlayRecentTrack: _playTrackFromEntry,
+        onCreateCollection: () => _createCollection(CollectionType.feature),
+        onUploadToCollection: () =>
+            _uploadSongsToTypeCollection(CollectionType.feature),
+        onPlayAll: () => _playFromType(CollectionType.feature, shuffle: false),
+        onShufflePlay: () =>
+            _playFromType(CollectionType.feature, shuffle: true),
+        onMenuAction: _runMenuAction,
+      ),
       _HomeTab.playlist => LibraryPage(
-          key: const ValueKey('playlists'),
-          tabType: CollectionType.playlist,
-          entries: _ofType(CollectionType.playlist),
-          recentTracks: _recentTracksForType(CollectionType.playlist),
-          onOpen: _openDetail,
-          onPlayRecentTrack: _playTrackFromEntry,
-          onCreateCollection: () => _createCollection(CollectionType.playlist),
-          onUploadToCollection: () =>
-              _uploadSongsToTypeCollection(CollectionType.playlist),
-          onPlayAll: () =>
-              _playFromType(CollectionType.playlist, shuffle: false),
-          onShufflePlay: () =>
-              _playFromType(CollectionType.playlist, shuffle: true),
-          onMenuAction: _runMenuAction,
-        ),
-      _HomeTab.story => const ArtistHistoryPage(key: ValueKey('story')),
+        key: const ValueKey('playlists'),
+        tabType: CollectionType.playlist,
+        entries: _ofType(CollectionType.playlist),
+        recentTracks: _recentTracksForType(CollectionType.playlist),
+        onOpen: _openDetail,
+        onPlayRecentTrack: _playTrackFromEntry,
+        onCreateCollection: () => _createCollection(CollectionType.playlist),
+        onUploadToCollection: () =>
+            _uploadSongsToTypeCollection(CollectionType.playlist),
+        onPlayAll: () => _playFromType(CollectionType.playlist, shuffle: false),
+        onShufflePlay: () =>
+            _playFromType(CollectionType.playlist, shuffle: true),
+        onMenuAction: _runMenuAction,
+      ),
+      _HomeTab.story => ArtistHistoryPage(
+        key: const ValueKey('story'),
+        content: _storyContent,
+        isEditMode: _isEditMode,
+        onEditStory: _openStoryEditor,
+      ),
       _HomeTab.launch => SplashCatalogPage(
-          key: const ValueKey('launch'),
-          autoAdvance: false,
-          tagLabel: 'Launch Screen',
-          secondaryCtaLabel: 'Back',
-          primaryCtaLabel: 'Back To Vault',
-          onFinished: () => _onTabSelected(0),
-        ),
+        key: const ValueKey('launch'),
+        autoAdvance: false,
+        tagLabel: 'Launch Screen',
+        secondaryCtaLabel: 'Back',
+        primaryCtaLabel: 'Back To Vault',
+        onFinished: () => _onTabSelected(0),
+      ),
     };
 
     final previousIndex = _previousTabIndex.clamp(0, maxIndex);
@@ -1617,11 +2002,21 @@ class _HomeShellState extends State<HomeShell> {
         ),
         title: Text(
           _titleForTab(currentTab),
-          style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                letterSpacing: 1.2,
-              ),
+          style: Theme.of(
+            context,
+          ).textTheme.headlineSmall?.copyWith(letterSpacing: 1.2),
         ),
         actions: [
+          if (_isEditMode)
+            const Padding(
+              padding: EdgeInsets.only(right: 4),
+              child: Center(
+                child: Chip(
+                  avatar: Icon(Icons.edit, size: 16),
+                  label: Text('Edit Mode'),
+                ),
+              ),
+            ),
           IconButton(
             tooltip: 'Search library',
             icon: const Icon(Icons.search),
@@ -1632,6 +2027,26 @@ class _HomeShellState extends State<HomeShell> {
             icon: const Icon(Icons.more_vert),
             onSelected: (value) async {
               switch (value) {
+                case 'enter_edit':
+                  _setEditMode(true);
+                  _showMessage('Edit mode enabled.');
+                  break;
+                case 'exit_edit':
+                  _setEditMode(false);
+                  _showMessage('Edit mode disabled.');
+                  break;
+                case 'theme_editor':
+                  await _openThemeEditor();
+                  break;
+                case 'upload_backgrounds':
+                  await _uploadBackdropImages();
+                  break;
+                case 'reset_backgrounds':
+                  _resetBackdropImages();
+                  break;
+                case 'edit_story':
+                  await _openStoryEditor();
+                  break;
                 case 'remove_story':
                   await _deleteStoryTab();
                   break;
@@ -1647,6 +2062,42 @@ class _HomeShellState extends State<HomeShell> {
               }
             },
             itemBuilder: (context) => [
+              if (_isEditMode)
+                const PopupMenuItem(
+                  value: 'exit_edit',
+                  child: Text('Exit Edit Mode'),
+                )
+              else
+                const PopupMenuItem(
+                  value: 'enter_edit',
+                  child: Text('Enter Edit Mode'),
+                ),
+              if (_isEditMode) const PopupMenuDivider(),
+              if (_isEditMode)
+                const PopupMenuItem(
+                  value: 'theme_editor',
+                  child: Text('Edit Fonts & Colors'),
+                ),
+              if (_isEditMode)
+                const PopupMenuItem(
+                  value: 'upload_backgrounds',
+                  child: Text('Upload Background Images'),
+                ),
+              if (_isEditMode)
+                PopupMenuItem(
+                  value: 'reset_backgrounds',
+                  child: Text(
+                    _customBackdropSources.isEmpty
+                        ? 'Use Default Backgrounds'
+                        : 'Reset Backgrounds To Default',
+                  ),
+                ),
+              if (_isEditMode && currentTab == _HomeTab.story)
+                const PopupMenuItem(
+                  value: 'edit_story',
+                  child: Text('Edit Story Content'),
+                ),
+              const PopupMenuDivider(),
               if (_showStoryTab)
                 const PopupMenuItem(
                   value: 'remove_story',
@@ -1715,7 +2166,8 @@ class _HomeShellState extends State<HomeShell> {
                           : _entryById(_currentEntryId!),
                       isPlaying: _isPlaying,
                       isLoading: _processingState == ProcessingState.loading,
-                      isBuffering: _processingState == ProcessingState.buffering,
+                      isBuffering:
+                          _processingState == ProcessingState.buffering,
                       durationListenable: _durationListenable,
                       positionListenable: _positionListenable,
                       onToggle: _togglePlayback,
@@ -1723,8 +2175,11 @@ class _HomeShellState extends State<HomeShell> {
                       isExpanded: _miniPlayerExpanded,
                       onToggleSize: _toggleMiniPlayerSize,
                       onSeek: _seekTo,
-                      onSkipBack: () => _seekBySeconds(-10),
-                      onSkipForward: () => _seekBySeconds(10),
+                      onPrevious: _playPreviousInEntry,
+                      onNext: _playNextInEntry,
+                      onToggleShuffle: () =>
+                          _setShuffleEnabled(!_shuffleEnabled),
+                      shuffleEnabled: _shuffleEnabled,
                     ),
             ),
             FloatingNavBar(
@@ -1773,19 +2228,13 @@ class _HomeShellState extends State<HomeShell> {
 }
 
 class _RecentPlayPointer {
-  const _RecentPlayPointer({
-    required this.entryId,
-    required this.trackId,
-  });
+  const _RecentPlayPointer({required this.entryId, required this.trackId});
 
   final String entryId;
   final String trackId;
 
   Map<String, dynamic> toJson() {
-    return {
-      'entryId': entryId,
-      'trackId': trackId,
-    };
+    return {'entryId': entryId, 'trackId': trackId};
   }
 
   static _RecentPlayPointer? fromJson(Map<String, dynamic> json) {
@@ -1799,10 +2248,7 @@ class _RecentPlayPointer {
 }
 
 class _TrackSearchHit {
-  const _TrackSearchHit({
-    required this.entry,
-    required this.track,
-  });
+  const _TrackSearchHit({required this.entry, required this.track});
 
   final CollectionEntry entry;
   final Track track;
@@ -1864,15 +2310,18 @@ class _LibrarySearchDelegate extends SearchDelegate<void> {
     if (rawQuery.isEmpty) {
       return const [];
     }
-    return entries.where((entry) {
-      final haystack = [
-        entry.title,
-        entry.history,
-        entry.type.label,
-        ...entry.featuredArtists,
-      ].join(' ').toLowerCase();
-      return haystack.contains(rawQuery);
-    }).take(20).toList();
+    return entries
+        .where((entry) {
+          final haystack = [
+            entry.title,
+            entry.history,
+            entry.type.label,
+            ...entry.featuredArtists,
+          ].join(' ').toLowerCase();
+          return haystack.contains(rawQuery);
+        })
+        .take(20)
+        .toList();
   }
 
   List<_TrackSearchHit> _matchingTracks(String rawQuery) {
@@ -1933,58 +2382,39 @@ class _LibrarySearchDelegate extends SearchDelegate<void> {
     }
 
     if (hasQuery && collections.isEmpty && tracks.isEmpty) {
-      return const Center(
-        child: Text('No matches found.'),
-      );
+      return const Center(child: Text('No matches found.'));
     }
 
     return ListView(
       padding: const EdgeInsets.fromLTRB(12, 8, 12, 16),
       children: [
         if (!hasQuery && recentTracks.isNotEmpty) ...[
-          Text(
-            'Recent Plays',
-            style: Theme.of(context).textTheme.titleMedium,
-          ),
+          Text('Recent Plays', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 8),
           for (final item in recentTracks)
             ListTile(
               leading: const Icon(Icons.history),
               title: Text(item.track.title),
-              subtitle: Text(
-                '${item.entry.title} • ${item.entry.type.label}',
-              ),
+              subtitle: Text('${item.entry.title} • ${item.entry.type.label}'),
               trailing: const Icon(Icons.play_arrow),
-              onTap: () => _playTrackResult(
-                context,
-                item.track,
-                item.entry,
-              ),
+              onTap: () => _playTrackResult(context, item.track, item.entry),
             ),
         ],
         if (hasQuery && tracks.isNotEmpty) ...[
-          Text(
-            'Songs',
-            style: Theme.of(context).textTheme.titleMedium,
-          ),
+          Text('Songs', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 8),
           for (final hit in tracks)
             ListTile(
               leading: const Icon(Icons.music_note),
               title: Text(hit.track.title),
-              subtitle: Text(
-                '${hit.track.artist} • ${hit.entry.title}',
-              ),
+              subtitle: Text('${hit.track.artist} • ${hit.entry.title}'),
               trailing: const Icon(Icons.play_arrow),
               onTap: () => _playTrackResult(context, hit.track, hit.entry),
             ),
           const SizedBox(height: 8),
         ],
         if (hasQuery && collections.isNotEmpty) ...[
-          Text(
-            'Collections',
-            style: Theme.of(context).textTheme.titleMedium,
-          ),
+          Text('Collections', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 8),
           for (final entry in collections)
             ListTile(
@@ -2002,12 +2432,189 @@ class _LibrarySearchDelegate extends SearchDelegate<void> {
   }
 }
 
+List<PlatformFile> _platformFilesFromPaths(List<String> paths) {
+  final files = <PlatformFile>[];
+  for (final rawPath in paths) {
+    final filePath = rawPath.trim();
+    if (filePath.isEmpty) {
+      continue;
+    }
+    files.add(
+      PlatformFile(name: path.basename(filePath), size: 0, path: filePath),
+    );
+  }
+  return files;
+}
+
+String? _normalizeDirectoryPathForListing(String rawDirectoryPath) {
+  final trimmed = rawDirectoryPath.trim();
+  if (trimmed.isEmpty) {
+    return null;
+  }
+  final uri = Uri.tryParse(trimmed);
+  if (uri != null && uri.scheme == 'file') {
+    return localFilePathFromUri(uri);
+  }
+  return trimmed;
+}
+
+Future<List<String>?> _showFolderAudioBulkPicker({
+  required BuildContext context,
+  required String rootDirectory,
+  required List<String> filePaths,
+  required String title,
+}) async {
+  if (filePaths.isEmpty) {
+    return const [];
+  }
+
+  final selected = List<bool>.filled(filePaths.length, true);
+  var selectedCount = selected.length;
+  final relativePaths = [
+    for (final filePath in filePaths)
+      path.relative(filePath, from: rootDirectory),
+  ];
+
+  return showModalBottomSheet<List<String>>(
+    context: context,
+    isScrollControlled: true,
+    showDragHandle: true,
+    builder: (context) {
+      return StatefulBuilder(
+        builder: (context, setModalState) {
+          return SafeArea(
+            child: FractionallySizedBox(
+              heightFactor: 0.86,
+              child: Column(
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 6, 16, 8),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                title,
+                                style: Theme.of(context).textTheme.titleMedium,
+                              ),
+                              Text(
+                                '${filePaths.length} detected • $selectedCount selected',
+                                style: Theme.of(context).textTheme.bodySmall,
+                              ),
+                            ],
+                          ),
+                        ),
+                        TextButton(
+                          onPressed: () {
+                            setModalState(() {
+                              for (int i = 0; i < selected.length; i++) {
+                                selected[i] = true;
+                              }
+                              selectedCount = selected.length;
+                            });
+                          },
+                          child: const Text('Select All'),
+                        ),
+                        TextButton(
+                          onPressed: () {
+                            setModalState(() {
+                              for (int i = 0; i < selected.length; i++) {
+                                selected[i] = false;
+                              }
+                              selectedCount = 0;
+                            });
+                          },
+                          child: const Text('Clear'),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const Divider(height: 1),
+                  Expanded(
+                    child: ListView.builder(
+                      itemCount: filePaths.length,
+                      itemBuilder: (context, index) {
+                        final isChecked = selected[index];
+                        final fullPath = filePaths[index];
+                        final relative = relativePaths[index];
+                        return CheckboxListTile(
+                          value: isChecked,
+                          title: Text(
+                            path.basename(fullPath),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          subtitle: Text(
+                            relative,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          controlAffinity: ListTileControlAffinity.leading,
+                          dense: true,
+                          onChanged: (value) {
+                            final next = value ?? false;
+                            if (next == selected[index]) {
+                              return;
+                            }
+                            setModalState(() {
+                              selected[index] = next;
+                              if (next) {
+                                selectedCount += 1;
+                              } else {
+                                selectedCount -= 1;
+                              }
+                            });
+                          },
+                        );
+                      },
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 10, 16, 14),
+                    child: Row(
+                      children: [
+                        TextButton(
+                          onPressed: () => Navigator.pop(context),
+                          child: const Text('Cancel'),
+                        ),
+                        const Spacer(),
+                        FilledButton.icon(
+                          onPressed: selectedCount == 0
+                              ? null
+                              : () {
+                                  final picked = <String>[];
+                                  for (int i = 0; i < filePaths.length; i++) {
+                                    if (selected[i]) {
+                                      picked.add(filePaths[i]);
+                                    }
+                                  }
+                                  Navigator.pop(context, picked);
+                                },
+                          icon: const Icon(Icons.library_add),
+                          label: Text('Add $selectedCount'),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      );
+    },
+  );
+}
+
 class _NewCollectionDraft {
   const _NewCollectionDraft({
     required this.title,
     required this.history,
     required this.featuredArtists,
     required this.selectedSongs,
+    required this.selectedSingleTrackIds,
     this.thumbnailPath,
     this.thumbnailDataBase64,
   });
@@ -2016,14 +2623,19 @@ class _NewCollectionDraft {
   final String history;
   final List<String> featuredArtists;
   final List<PlatformFile> selectedSongs;
+  final List<String> selectedSingleTrackIds;
   final String? thumbnailPath;
   final String? thumbnailDataBase64;
 }
 
 class _CreateCollectionDialog extends StatefulWidget {
-  const _CreateCollectionDialog({required this.type});
+  const _CreateCollectionDialog({
+    required this.type,
+    required this.availableSingleTracks,
+  });
 
   final CollectionType type;
+  final List<Track> availableSingleTracks;
 
   @override
   State<_CreateCollectionDialog> createState() =>
@@ -2039,6 +2651,7 @@ class _CreateCollectionDialogState extends State<_CreateCollectionDialog> {
   String? _thumbnailDataBase64;
   String? _thumbnailLabel;
   List<PlatformFile> _selectedSongs = [];
+  Set<String> _selectedSingleTrackIds = <String>{};
 
   @override
   void dispose() {
@@ -2062,7 +2675,8 @@ class _CreateCollectionDialogState extends State<_CreateCollectionDialog> {
       _thumbnailPath = selected.path?.trim();
       final shouldStoreBase64 =
           kIsWeb || _thumbnailPath == null || _thumbnailPath!.isEmpty;
-      _thumbnailDataBase64 = shouldStoreBase64 &&
+      _thumbnailDataBase64 =
+          shouldStoreBase64 &&
               selected.bytes != null &&
               selected.bytes!.isNotEmpty
           ? base64Encode(selected.bytes!)
@@ -2087,6 +2701,173 @@ class _CreateCollectionDialogState extends State<_CreateCollectionDialog> {
     });
   }
 
+  Future<void> _pickSongsFromFolder() async {
+    if (kIsWeb) {
+      _showDialogMessage('Folder upload is not supported on web.');
+      return;
+    }
+    try {
+      final directoryPath = await FilePicker.platform.getDirectoryPath(
+        dialogTitle: 'Select Music Folder',
+      );
+      if (!mounted || directoryPath == null || directoryPath.trim().isEmpty) {
+        return;
+      }
+      final normalizedDirectoryPath = _normalizeDirectoryPathForListing(
+        directoryPath,
+      );
+      if (normalizedDirectoryPath == null) {
+        return;
+      }
+      final paths = await listAudioFilesRecursively(normalizedDirectoryPath);
+      if (!mounted) {
+        return;
+      }
+      if (paths.isEmpty) {
+        _showDialogMessage(
+          'No supported audio files found in selected folder.',
+        );
+        return;
+      }
+      final selectedPaths = await _showFolderAudioBulkPicker(
+        context: context,
+        rootDirectory: normalizedDirectoryPath,
+        filePaths: paths,
+        title: 'Select Songs To Add',
+      );
+      if (!mounted) {
+        return;
+      }
+      if (selectedPaths == null || selectedPaths.isEmpty) {
+        if (selectedPaths != null) {
+          _showDialogMessage('No songs selected.');
+        }
+        return;
+      }
+      setState(() {
+        _selectedSongs = _platformFilesFromPaths(selectedPaths);
+      });
+    } catch (_) {
+      if (!mounted) {
+        return;
+      }
+      _showDialogMessage('Could not import songs from folder.');
+    }
+  }
+
+  void _showDialogMessage(String message) {
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    if (messenger == null) {
+      return;
+    }
+    messenger.showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  Future<void> _pickTracksFromSingles() async {
+    final sourceTracks = widget.availableSingleTracks;
+    if (sourceTracks.isEmpty) {
+      return;
+    }
+
+    final selected = Set<String>.from(_selectedSingleTrackIds);
+    final chosen = await showModalBottomSheet<Set<String>>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setModalState) {
+            return SafeArea(
+              child: FractionallySizedBox(
+                heightFactor: 0.85,
+                child: Column(
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 6, 16, 6),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              'Add Singles To Playlist',
+                              style: Theme.of(context).textTheme.titleMedium,
+                            ),
+                          ),
+                          TextButton(
+                            onPressed: () {
+                              setModalState(selected.clear);
+                            },
+                            child: const Text('Clear'),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const Divider(height: 1),
+                    Expanded(
+                      child: ListView.builder(
+                        itemCount: sourceTracks.length,
+                        itemBuilder: (context, index) {
+                          final track = sourceTracks[index];
+                          final selectedNow = selected.contains(track.id);
+                          return CheckboxListTile(
+                            value: selectedNow,
+                            title: Text(
+                              track.title,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            subtitle: Text(
+                              track.artist.isEmpty
+                                  ? 'Unknown artist'
+                                  : track.artist,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            controlAffinity: ListTileControlAffinity.leading,
+                            onChanged: (value) {
+                              setModalState(() {
+                                if (value == true) {
+                                  selected.add(track.id);
+                                } else {
+                                  selected.remove(track.id);
+                                }
+                              });
+                            },
+                          );
+                        },
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 10, 16, 16),
+                      child: Row(
+                        children: [
+                          TextButton(
+                            onPressed: () => Navigator.pop(context),
+                            child: const Text('Cancel'),
+                          ),
+                          const Spacer(),
+                          FilledButton(
+                            onPressed: () => Navigator.pop(context, selected),
+                            child: const Text('Done'),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+    if (!mounted || chosen == null) {
+      return;
+    }
+    setState(() {
+      _selectedSingleTrackIds = chosen;
+    });
+  }
+
   void _submit() {
     final title = _titleController.text.trim();
     if (title.isEmpty) {
@@ -2105,6 +2886,7 @@ class _CreateCollectionDialogState extends State<_CreateCollectionDialog> {
         history: _historyController.text.trim(),
         featuredArtists: featured,
         selectedSongs: _selectedSongs,
+        selectedSingleTrackIds: _selectedSingleTrackIds.toList(),
         thumbnailPath: _thumbnailPath,
         thumbnailDataBase64: _thumbnailDataBase64,
       ),
@@ -2160,6 +2942,36 @@ class _CreateCollectionDialogState extends State<_CreateCollectionDialog> {
               ),
               onPressed: _pickSongs,
             ),
+            if (!kIsWeb) ...[
+              const SizedBox(height: 10),
+              FilledButton.tonalIcon(
+                icon: const Icon(Icons.folder_open),
+                label: const Text('Upload Folder'),
+                onPressed: _pickSongsFromFolder,
+              ),
+            ],
+            if (widget.type == CollectionType.playlist) ...[
+              const SizedBox(height: 10),
+              FilledButton.tonalIcon(
+                icon: const Icon(Icons.library_music),
+                label: Text(
+                  _selectedSingleTrackIds.isEmpty
+                      ? 'Add From Existing Singles'
+                      : '${_selectedSingleTrackIds.length} single(s) added',
+                ),
+                onPressed: widget.availableSingleTracks.isEmpty
+                    ? null
+                    : _pickTracksFromSingles,
+              ),
+              if (widget.availableSingleTracks.isEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Text(
+                    'No singles available yet. Add songs in Singles first.',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ),
+            ],
           ],
         ),
       ),
@@ -2168,11 +2980,461 @@ class _CreateCollectionDialogState extends State<_CreateCollectionDialog> {
           onPressed: () => Navigator.pop(context),
           child: const Text('Cancel'),
         ),
-        FilledButton(
-          onPressed: _submit,
-          child: const Text('Save'),
+        FilledButton(onPressed: _submit, child: const Text('Save')),
+      ],
+    );
+  }
+}
+
+class _ThemeEditorDialog extends StatefulWidget {
+  const _ThemeEditorDialog({required this.initialSettings});
+
+  final AppThemeSettings initialSettings;
+
+  @override
+  State<_ThemeEditorDialog> createState() => _ThemeEditorDialogState();
+}
+
+class _ThemeEditorDialogState extends State<_ThemeEditorDialog> {
+  static const List<_ColorOption> _accentColors = [
+    _ColorOption(label: 'Gold', value: 0xFFFFB547),
+    _ColorOption(label: 'Sky', value: 0xFF5CC8FF),
+    _ColorOption(label: 'Mint', value: 0xFF2EE6D6),
+    _ColorOption(label: 'Rose', value: 0xFFFF6B6B),
+    _ColorOption(label: 'Lime', value: 0xFFB4FF5C),
+    _ColorOption(label: 'Purple', value: 0xFFB084FF),
+  ];
+
+  static const List<_ColorOption> _backgroundColors = [
+    _ColorOption(label: 'Black', value: 0xFF0C0B0A),
+    _ColorOption(label: 'Slate', value: 0xFF101720),
+    _ColorOption(label: 'Brown', value: 0xFF15110E),
+    _ColorOption(label: 'Graphite', value: 0xFF111111),
+    _ColorOption(label: 'Midnight', value: 0xFF0B1220),
+    _ColorOption(label: 'Olive', value: 0xFF13160F),
+  ];
+
+  late String _displayFontKey;
+  late String _bodyFontKey;
+  late int _primaryColorValue;
+  late int _secondaryColorValue;
+  late int _backgroundColorValue;
+
+  @override
+  void initState() {
+    super.initState();
+    _displayFontKey = widget.initialSettings.displayFontKey;
+    _bodyFontKey = widget.initialSettings.bodyFontKey;
+    _primaryColorValue = widget.initialSettings.primaryColorValue;
+    _secondaryColorValue = widget.initialSettings.secondaryColorValue;
+    _backgroundColorValue = widget.initialSettings.backgroundColorValue;
+  }
+
+  Widget _buildColorOptions({
+    required String title,
+    required List<_ColorOption> options,
+    required int selectedValue,
+    required ValueChanged<int> onChanged,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(title, style: Theme.of(context).textTheme.labelLarge),
+        const SizedBox(height: 6),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            for (final option in options)
+              ChoiceChip(
+                selected: selectedValue == option.value,
+                label: Text(option.label),
+                avatar: CircleAvatar(
+                  radius: 9,
+                  backgroundColor: Color(option.value),
+                ),
+                onSelected: (_) => onChanged(option.value),
+              ),
+          ],
         ),
       ],
     );
   }
+
+  void _submit() {
+    Navigator.pop(
+      context,
+      AppThemeSettings(
+        primaryColorValue: _primaryColorValue,
+        secondaryColorValue: _secondaryColorValue,
+        backgroundColorValue: _backgroundColorValue,
+        displayFontKey: _displayFontKey,
+        bodyFontKey: _bodyFontKey,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Edit Fonts & Colors'),
+      content: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 580),
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              DropdownButtonFormField<String>(
+                initialValue: _displayFontKey,
+                decoration: const InputDecoration(labelText: 'Display font'),
+                items: [
+                  for (final option in AppTheme.displayFontChoices)
+                    DropdownMenuItem(
+                      value: option.key,
+                      child: Text(option.label),
+                    ),
+                ],
+                onChanged: (value) {
+                  if (value == null) {
+                    return;
+                  }
+                  setState(() {
+                    _displayFontKey = value;
+                  });
+                },
+              ),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<String>(
+                initialValue: _bodyFontKey,
+                decoration: const InputDecoration(labelText: 'Body font'),
+                items: [
+                  for (final option in AppTheme.bodyFontChoices)
+                    DropdownMenuItem(
+                      value: option.key,
+                      child: Text(option.label),
+                    ),
+                ],
+                onChanged: (value) {
+                  if (value == null) {
+                    return;
+                  }
+                  setState(() {
+                    _bodyFontKey = value;
+                  });
+                },
+              ),
+              const SizedBox(height: 16),
+              _buildColorOptions(
+                title: 'Primary color',
+                options: _accentColors,
+                selectedValue: _primaryColorValue,
+                onChanged: (value) {
+                  setState(() {
+                    _primaryColorValue = value;
+                  });
+                },
+              ),
+              const SizedBox(height: 12),
+              _buildColorOptions(
+                title: 'Secondary color',
+                options: _accentColors,
+                selectedValue: _secondaryColorValue,
+                onChanged: (value) {
+                  setState(() {
+                    _secondaryColorValue = value;
+                  });
+                },
+              ),
+              const SizedBox(height: 12),
+              _buildColorOptions(
+                title: 'Background color',
+                options: _backgroundColors,
+                selectedValue: _backgroundColorValue,
+                onChanged: (value) {
+                  setState(() {
+                    _backgroundColorValue = value;
+                  });
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(onPressed: _submit, child: const Text('Apply')),
+      ],
+    );
+  }
+}
+
+class _StoryEditorDialog extends StatefulWidget {
+  const _StoryEditorDialog({required this.initialContent});
+
+  final StoryContent initialContent;
+
+  @override
+  State<_StoryEditorDialog> createState() => _StoryEditorDialogState();
+}
+
+class _StoryEditorDialogState extends State<_StoryEditorDialog> {
+  late TextEditingController _heroTitleController;
+  late TextEditingController _heroSummaryController;
+  late TextEditingController _timelineController;
+  late List<_StorySectionDraft> _sectionDrafts;
+
+  @override
+  void initState() {
+    super.initState();
+    _heroTitleController = TextEditingController(
+      text: widget.initialContent.heroTitle,
+    );
+    _heroSummaryController = TextEditingController(
+      text: widget.initialContent.heroSummary,
+    );
+    _timelineController = TextEditingController(
+      text: _encodeTimeline(widget.initialContent.timelineEvents),
+    );
+    _sectionDrafts = [
+      for (final section in widget.initialContent.sections)
+        _StorySectionDraft.fromSection(section),
+    ];
+  }
+
+  @override
+  void dispose() {
+    _heroTitleController.dispose();
+    _heroSummaryController.dispose();
+    _timelineController.dispose();
+    for (final draft in _sectionDrafts) {
+      draft.dispose();
+    }
+    super.dispose();
+  }
+
+  String _encodeTimeline(List<StoryEvent> events) {
+    return events
+        .map((event) => '${event.year} | ${event.title} | ${event.note}')
+        .join('\n');
+  }
+
+  List<StoryEvent> _parseTimeline(String raw) {
+    final lines = raw
+        .split('\n')
+        .map((line) => line.trim())
+        .where((line) => line.isNotEmpty);
+    final events = <StoryEvent>[];
+    for (final line in lines) {
+      final parts = line.split('|').map((item) => item.trim()).toList();
+      if (parts.length < 3) {
+        continue;
+      }
+      final year = parts[0];
+      final title = parts[1];
+      final note = parts.sublist(2).join(' | ');
+      if (year.isEmpty || title.isEmpty || note.isEmpty) {
+        continue;
+      }
+      events.add(StoryEvent(year: year, title: title, note: note));
+    }
+    return events;
+  }
+
+  void _resetDefaults() {
+    final defaults = StoryContent.defaults();
+    for (final draft in _sectionDrafts) {
+      draft.dispose();
+    }
+    setState(() {
+      _heroTitleController.text = defaults.heroTitle;
+      _heroSummaryController.text = defaults.heroSummary;
+      _timelineController.text = _encodeTimeline(defaults.timelineEvents);
+      _sectionDrafts = [
+        for (final section in defaults.sections)
+          _StorySectionDraft.fromSection(section),
+      ];
+    });
+  }
+
+  void _submit() {
+    final heroTitle = _heroTitleController.text.trim();
+    final heroSummary = _heroSummaryController.text.trim();
+    if (heroTitle.isEmpty || heroSummary.isEmpty) {
+      return;
+    }
+    final sections = <StorySection>[];
+    for (final draft in _sectionDrafts) {
+      final section = draft.toSection();
+      if (section != null) {
+        sections.add(section);
+      }
+    }
+    if (sections.isEmpty) {
+      return;
+    }
+
+    final events = _parseTimeline(_timelineController.text.trim());
+    final effectiveEvents = events.isEmpty
+        ? widget.initialContent.timelineEvents
+        : events;
+
+    Navigator.pop(
+      context,
+      widget.initialContent.copyWith(
+        heroTitle: heroTitle,
+        heroSummary: heroSummary,
+        sections: sections,
+        timelineEvents: effectiveEvents,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Edit Story'),
+      content: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 680),
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              TextField(
+                controller: _heroTitleController,
+                decoration: const InputDecoration(labelText: 'Hero title'),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: _heroSummaryController,
+                maxLines: 3,
+                decoration: const InputDecoration(labelText: 'Hero summary'),
+              ),
+              const SizedBox(height: 14),
+              for (final draft in _sectionDrafts)
+                ExpansionTile(
+                  tilePadding: EdgeInsets.zero,
+                  title: Text('Section ${draft.indexLabel}'),
+                  subtitle: Text(
+                    draft.titleController.text.isEmpty
+                        ? 'Add title'
+                        : draft.titleController.text,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  children: [
+                    TextField(
+                      controller: draft.titleController,
+                      decoration: const InputDecoration(labelText: 'Title'),
+                    ),
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: draft.summaryController,
+                      maxLines: 3,
+                      decoration: const InputDecoration(labelText: 'Summary'),
+                    ),
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: draft.pointsController,
+                      maxLines: 4,
+                      decoration: const InputDecoration(
+                        labelText: 'Bullet points (one per line)',
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                  ],
+                ),
+              const SizedBox(height: 8),
+              Text(
+                'Timeline rows (format: year | title | note)',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+              const SizedBox(height: 6),
+              TextField(
+                controller: _timelineController,
+                maxLines: 8,
+                decoration: const InputDecoration(
+                  hintText: '2007 | The Come Up | May 4, 2007',
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _resetDefaults,
+          child: const Text('Reset Defaults'),
+        ),
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(onPressed: _submit, child: const Text('Save')),
+      ],
+    );
+  }
+}
+
+class _StorySectionDraft {
+  _StorySectionDraft({
+    required this.indexLabel,
+    required this.imageSource,
+    required this.titleController,
+    required this.summaryController,
+    required this.pointsController,
+  });
+
+  factory _StorySectionDraft.fromSection(StorySection section) {
+    return _StorySectionDraft(
+      indexLabel: section.indexLabel,
+      imageSource: section.imageSource,
+      titleController: TextEditingController(text: section.title),
+      summaryController: TextEditingController(text: section.summary),
+      pointsController: TextEditingController(text: section.points.join('\n')),
+    );
+  }
+
+  final String indexLabel;
+  final String imageSource;
+  final TextEditingController titleController;
+  final TextEditingController summaryController;
+  final TextEditingController pointsController;
+
+  StorySection? toSection() {
+    final title = titleController.text.trim();
+    final summary = summaryController.text.trim();
+    if (title.isEmpty || summary.isEmpty) {
+      return null;
+    }
+    final points = pointsController.text
+        .split('\n')
+        .map((line) => line.trim())
+        .where((line) => line.isNotEmpty)
+        .toList();
+    return StorySection(
+      indexLabel: indexLabel,
+      title: title,
+      summary: summary,
+      points: points,
+      imageSource: imageSource,
+    );
+  }
+
+  void dispose() {
+    titleController.dispose();
+    summaryController.dispose();
+    pointsController.dispose();
+  }
+}
+
+class _ColorOption {
+  const _ColorOption({required this.label, required this.value});
+
+  final String label;
+  final int value;
 }

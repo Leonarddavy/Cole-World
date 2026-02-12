@@ -19,8 +19,10 @@ class MiniPlayerBar extends StatelessWidget {
     required this.positionListenable,
     required this.onToggle,
     required this.onSeek,
-    required this.onSkipBack,
-    required this.onSkipForward,
+    required this.onPrevious,
+    required this.onNext,
+    required this.onToggleShuffle,
+    required this.shuffleEnabled,
     this.onOpenNowPlaying,
     this.isExpanded = true,
     this.onToggleSize,
@@ -35,8 +37,10 @@ class MiniPlayerBar extends StatelessWidget {
   final ValueListenable<Duration> positionListenable;
   final VoidCallback onToggle;
   final Future<void> Function(Duration position) onSeek;
-  final Future<void> Function() onSkipBack;
-  final Future<void> Function() onSkipForward;
+  final Future<void> Function() onPrevious;
+  final Future<void> Function() onNext;
+  final VoidCallback onToggleShuffle;
+  final bool shuffleEnabled;
   final VoidCallback? onOpenNowPlaying;
   final bool isExpanded;
   final VoidCallback? onToggleSize;
@@ -54,8 +58,10 @@ class MiniPlayerBar extends StatelessWidget {
             final maxMillis = duration.inMilliseconds <= 0
                 ? 1
                 : duration.inMilliseconds;
-            final clampedMillis =
-                min(position.inMilliseconds, maxMillis).toDouble();
+            final clampedMillis = min(
+              position.inMilliseconds,
+              maxMillis,
+            ).toDouble();
             final progress = duration.inMilliseconds <= 0
                 ? 0.0
                 : position.inMilliseconds / duration.inMilliseconds;
@@ -65,7 +71,10 @@ class MiniPlayerBar extends StatelessWidget {
               curve: Curves.easeOutCubic,
               child: Container(
                 margin: const EdgeInsets.fromLTRB(14, 0, 14, 10),
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 10,
+                ),
                 decoration: BoxDecoration(
                   borderRadius: BorderRadius.circular(16),
                   gradient: const LinearGradient(
@@ -128,7 +137,9 @@ class MiniPlayerBar extends StatelessWidget {
                                     track.artist,
                                     maxLines: 1,
                                     overflow: TextOverflow.ellipsis,
-                                    style: Theme.of(context).textTheme.bodySmall,
+                                    style: Theme.of(
+                                      context,
+                                    ).textTheme.bodySmall,
                                   ),
                               ],
                             ),
@@ -150,8 +161,9 @@ class MiniPlayerBar extends StatelessWidget {
                                     key: ValueKey('busy'),
                                     width: 26,
                                     height: 26,
-                                    child:
-                                        CircularProgressIndicator(strokeWidth: 2.6),
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2.6,
+                                    ),
                                   )
                                 : Icon(
                                     isPlaying
@@ -179,8 +191,9 @@ class MiniPlayerBar extends StatelessWidget {
                           value: clampedMillis,
                           onChanged: duration.inMilliseconds <= 0
                               ? null
-                              : (value) =>
-                                    onSeek(Duration(milliseconds: value.round())),
+                              : (value) => onSeek(
+                                  Duration(milliseconds: value.round()),
+                                ),
                         ),
                       ),
                       Row(
@@ -191,12 +204,22 @@ class MiniPlayerBar extends StatelessWidget {
                           ),
                           const Spacer(),
                           IconButton(
-                            onPressed: () => onSkipBack(),
-                            icon: const Icon(Icons.replay_10),
+                            tooltip: 'Previous',
+                            onPressed: () => onPrevious(),
+                            icon: const Icon(Icons.skip_previous_rounded),
                           ),
                           IconButton(
-                            onPressed: () => onSkipForward(),
-                            icon: const Icon(Icons.forward_10),
+                            tooltip: 'Shuffle',
+                            color: shuffleEnabled
+                                ? const Color(0xFFFFB547)
+                                : Colors.white70,
+                            onPressed: onToggleShuffle,
+                            icon: const Icon(Icons.shuffle),
+                          ),
+                          IconButton(
+                            tooltip: 'Next',
+                            onPressed: () => onNext(),
+                            icon: const Icon(Icons.skip_next_rounded),
                           ),
                           Text(
                             _formatDuration(duration),
