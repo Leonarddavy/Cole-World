@@ -13,16 +13,27 @@ class ArtworkCard extends StatelessWidget {
     required this.entry,
     required this.borderRadius,
     this.heroTag,
+    this.imagePath,
   });
 
   final CollectionEntry entry;
   final BorderRadius borderRadius;
   final String? heroTag;
 
+  /// A local image (e.g. the playing track's own cover) shown in place of the
+  /// collection thumbnail when it exists.
+  final String? imagePath;
+
   @override
   Widget build(BuildContext context) {
-    final thumbnailPath = entry.thumbnailPath;
-    final thumbData = entry.thumbnailDataBase64;
+    final overridePath = imagePath;
+    final useOverride =
+        overridePath != null &&
+        overridePath.isNotEmpty &&
+        !kIsWeb &&
+        canLoadLocalImage(overridePath);
+    final thumbnailPath = useOverride ? overridePath : entry.thumbnailPath;
+    final thumbData = useOverride ? null : entry.thumbnailDataBase64;
     Uint8List? bytes;
     if (thumbData != null && thumbData.isNotEmpty) {
       try {
@@ -71,10 +82,7 @@ class ArtworkCard extends StatelessWidget {
                   gradient: LinearGradient(
                     begin: Alignment.topCenter,
                     end: Alignment.bottomCenter,
-                    colors: [
-                      Color(0x11000000),
-                      Color(0x77000000),
-                    ],
+                    colors: [Color(0x11000000), Color(0x77000000)],
                   ),
                 ),
               ),
@@ -92,9 +100,9 @@ class ArtworkCard extends StatelessWidget {
                 child: Text(
                   entry.type.label.toUpperCase(),
                   style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                        fontSize: 10,
-                        letterSpacing: 1.1,
-                      ),
+                    fontSize: 10,
+                    letterSpacing: 1.1,
+                  ),
                 ),
               ),
             ),

@@ -4,6 +4,7 @@ import 'package:just_audio/just_audio.dart';
 
 import '../models/collection_models.dart';
 import '../models/entry_menu_action.dart';
+import '../services/play_queue.dart';
 import '../ui/collection_type_ui.dart';
 import '../widgets/artwork_card.dart';
 import '../widgets/graffiti_scaffold.dart';
@@ -11,7 +12,7 @@ import '../widgets/graffiti_tag.dart';
 import '../widgets/now_playing_equalizer.dart';
 import '../widgets/staggered_song_tile.dart';
 
-enum _TrackMenuAction { details }
+enum _TrackMenuAction { playNext, addToQueue, like, details }
 
 class CollectionDetailPage extends StatefulWidget {
   const CollectionDetailPage({
@@ -25,12 +26,16 @@ class CollectionDetailPage extends StatefulWidget {
     required this.onOpenNowPlaying,
     required this.onOpenQueuedNowPlaying,
     required this.queueListenable,
-    required this.currentEntryId,
+    required this.onJumpToQueueItem,
+    required this.onPlayNext,
+    required this.onAddToQueue,
     required this.onShowTrackDetails,
     required this.onReorderTracks,
     required this.onDeleteTrack,
     required this.onMenuAction,
     required this.resolveEntry,
+    required this.likedTrackIdsListenable,
+    required this.onToggleLike,
   });
 
   final CollectionEntry entry;
@@ -41,8 +46,10 @@ class CollectionDetailPage extends StatefulWidget {
   final Future<void> Function(Track track, CollectionEntry entry) onToggleTrack;
   final VoidCallback onOpenNowPlaying;
   final VoidCallback onOpenQueuedNowPlaying;
-  final ValueListenable<List<Track>> queueListenable;
-  final String? currentEntryId;
+  final ValueListenable<PlayQueueView> queueListenable;
+  final ValueChanged<String> onJumpToQueueItem;
+  final Future<void> Function(Track track, CollectionEntry entry) onPlayNext;
+  final Future<void> Function(Track track, CollectionEntry entry) onAddToQueue;
   final Future<void> Function(Track track, CollectionEntry entry)
   onShowTrackDetails;
   final Future<void> Function(String entryId, int oldIndex, int newIndex)
@@ -51,6 +58,8 @@ class CollectionDetailPage extends StatefulWidget {
   final Future<void> Function(CollectionEntry entry, EntryMenuAction action)
   onMenuAction;
   final CollectionEntry? Function(String id) resolveEntry;
+  final ValueListenable<Set<String>> likedTrackIdsListenable;
+  final ValueChanged<Track> onToggleLike;
 
   @override
   State<CollectionDetailPage> createState() => _CollectionDetailPageState();
@@ -60,47 +69,23 @@ class _CollectionDetailPageState extends State<CollectionDetailPage> {
   late CollectionEntry _entry =
       widget.resolveEntry(widget.entry.id) ?? widget.entry;
 
-  List<Track> _upNextQueue({
-    required List<Track> queue,
-    Track? currentTrack,
-  }) {
-    if (queue.isEmpty) {
-      return const [];
-    }
-    if (currentTrack == null) {
-      return queue;
-    }
-    final index = queue.indexWhere((track) => track.id == currentTrack.id);
-    if (index < 0 || index >= queue.length - 1) {
-      return const [];
-    }
-    return queue.sublist(index + 1);
-  }
-
-  Widget _buildQueueSection(BuildContext context, Track? currentTrack) {
+  Widget _buildQueueSection(BuildContext context) {
     final theme = Theme.of(context);
-    final isCurrentEntry = widget.currentEntryId == _entry.id;
-    final supportsQueue = _entry.type == CollectionType.album ||
-        _entry.type == CollectionType.playlist;
-    if (!isCurrentEntry || !supportsQueue) {
-      return const SizedBox.shrink();
-    }
-
-    return ValueListenableBuilder<List<Track>>(
+    return ValueListenableBuilder<PlayQueueView>(
       valueListenable: widget.queueListenable,
       builder: (context, queue, _) {
-        final upNext = _upNextQueue(queue: queue, currentTrack: currentTrack);
-        if (queue.isEmpty) {
+        if (queue.contextEntryId != _entry.id || queue.current == null) {
           return const SizedBox.shrink();
         }
+        final upNext = [
+          ...queue.upNextUserIndices,
+          ...queue.upNextContextIndices,
+        ];
 
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              'Queue',
-              style: theme.textTheme.titleMedium,
-            ),
+            Text('Queue', style: theme.textTheme.titleMedium),
             const SizedBox(height: 8),
             if (upNext.isEmpty)
               Text(
@@ -108,27 +93,32 @@ class _CollectionDetailPageState extends State<CollectionDetailPage> {
                 style: theme.textTheme.bodySmall,
               )
             else
-              ListView.separated(
-                shrinkWrap: true,
-                physics: const NeverScrollableScrollPhysics(),
-                itemCount: upNext.length,
-                separatorBuilder: (_, index) => const Divider(height: 1),
-                itemBuilder: (context, index) {
-                  final track = upNext[index];
-                  return ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    leading: const Icon(Icons.queue_music),
-                    title: Text(track.title),
-                    subtitle: Text(track.artist),
-                    trailing: const Icon(Icons.arrow_forward_ios, size: 14),
-                    onTap: () async {
-                      await widget.onPlayTrack(track, _entry);
-                      if (context.mounted) {
+              for (final index in upNext.take(10))
+                Builder(
+                  builder: (context) {
+                    final item = queue.items[index];
+                    return ListTile(
+                      key: ValueKey(item.uid),
+                      contentPadding: EdgeInsets.zero,
+                      leading: Icon(
+                        item.userQueued
+                            ? Icons.playlist_add_check
+                            : Icons.queue_music,
+                      ),
+                      title: Text(item.track.title),
+                      subtitle: Text(item.track.artist),
+                      trailing: const Icon(Icons.arrow_forward_ios, size: 14),
+                      onTap: () {
+                        widget.onJumpToQueueItem(item.uid);
                         widget.onOpenQueuedNowPlaying();
-                      }
-                    },
-                  );
-                },
+                      },
+                    );
+                  },
+                ),
+            if (upNext.length > 10)
+              Text(
+                '+${upNext.length - 10} more in Now Playing',
+                style: theme.textTheme.bodySmall,
               ),
             const SizedBox(height: 12),
           ],
@@ -176,10 +166,7 @@ class _CollectionDetailPageState extends State<CollectionDetailPage> {
             children: [
               GraffitiTag(label: _entry.type.label),
               const SizedBox(height: 10),
-              Text(
-                _entry.title,
-                style: theme.textTheme.headlineLarge,
-              ),
+              Text(_entry.title, style: theme.textTheme.headlineLarge),
               const SizedBox(height: 4),
               Text(
                 '$trackCount ${trackCount == 1 ? 'song' : 'songs'}',
@@ -193,13 +180,65 @@ class _CollectionDetailPageState extends State<CollectionDetailPage> {
   }
 
   Future<void> _refreshFromSource() async {
+    if (!mounted) {
+      return;
+    }
     final fresh = widget.resolveEntry(_entry.id);
-    if (!mounted || fresh == null) {
+    if (fresh == null) {
+      // The collection was deleted; there is nothing left to show here.
+      Navigator.of(context).maybePop();
       return;
     }
     setState(() {
       _entry = fresh;
     });
+  }
+
+  Future<void> _deleteTrack(Track track) async {
+    await widget.onDeleteTrack(_entry.id, track);
+    await _refreshFromSource();
+  }
+
+  /// Smart playlists are computed from other collections, so their songs
+  /// can't be reordered or deleted from here.
+  bool get _isReadOnly => _entry.isSmart;
+
+  Future<void> _onTrackMenu(_TrackMenuAction action, Track track) async {
+    switch (action) {
+      case _TrackMenuAction.playNext:
+        await widget.onPlayNext(track, _entry);
+      case _TrackMenuAction.addToQueue:
+        await widget.onAddToQueue(track, _entry);
+      case _TrackMenuAction.like:
+        widget.onToggleLike(track);
+        // Unliking from Liked Songs removes the row.
+        await _refreshFromSource();
+      case _TrackMenuAction.details:
+        await widget.onShowTrackDetails(track, _entry);
+    }
+  }
+
+  List<PopupMenuEntry<_TrackMenuAction>> _trackMenuItems(Track track) {
+    final liked = widget.likedTrackIdsListenable.value.contains(track.id);
+    return [
+      const PopupMenuItem(
+        value: _TrackMenuAction.playNext,
+        child: Text('Play next'),
+      ),
+      const PopupMenuItem(
+        value: _TrackMenuAction.addToQueue,
+        child: Text('Add to queue'),
+      ),
+      const PopupMenuDivider(),
+      PopupMenuItem(
+        value: _TrackMenuAction.like,
+        child: Text(liked ? 'Remove from Liked Songs' : 'Add to Liked Songs'),
+      ),
+      const PopupMenuItem(
+        value: _TrackMenuAction.details,
+        child: Text('Details'),
+      ),
+    ];
   }
 
   Future<void> _handleMenu(EntryMenuAction action) async {
@@ -218,7 +257,8 @@ class _CollectionDetailPageState extends State<CollectionDetailPage> {
             final state = snapshot.data;
             final playing = state?.playing ?? false;
             final processing = state?.processingState ?? ProcessingState.idle;
-            final busy = processing == ProcessingState.loading ||
+            final busy =
+                processing == ProcessingState.loading ||
                 processing == ProcessingState.buffering;
             final currentTrackId = currentTrack?.id;
 
@@ -232,33 +272,34 @@ class _CollectionDetailPageState extends State<CollectionDetailPage> {
                       style: Theme.of(context).textTheme.headlineSmall,
                     ),
                     actions: [
-                      PopupMenuButton<EntryMenuAction>(
-                        icon: const Icon(Icons.menu_rounded),
-                        onSelected: _handleMenu,
-                        itemBuilder: (context) {
-                          final items = <PopupMenuEntry<EntryMenuAction>>[];
-                          if (_entry.type.supportsMenuEdit) {
-                            items.addAll(const [
-                              PopupMenuItem(
-                                value: EntryMenuAction.uploadSongs,
-                                child: Text('Upload Songs'),
+                      if (!_isReadOnly)
+                        PopupMenuButton<EntryMenuAction>(
+                          icon: const Icon(Icons.menu_rounded),
+                          onSelected: _handleMenu,
+                          itemBuilder: (context) {
+                            final items = <PopupMenuEntry<EntryMenuAction>>[];
+                            if (_entry.type.supportsMenuEdit) {
+                              items.addAll(const [
+                                PopupMenuItem(
+                                  value: EntryMenuAction.uploadSongs,
+                                  child: Text('Upload Songs'),
+                                ),
+                                PopupMenuItem(
+                                  value: EntryMenuAction.editThumbnail,
+                                  child: Text('Edit Thumbnail'),
+                                ),
+                                PopupMenuDivider(),
+                              ]);
+                            }
+                            items.add(
+                              const PopupMenuItem(
+                                value: EntryMenuAction.deleteCollection,
+                                child: Text('Delete Collection'),
                               ),
-                              PopupMenuItem(
-                                value: EntryMenuAction.editThumbnail,
-                                child: Text('Edit Thumbnail'),
-                              ),
-                              PopupMenuDivider(),
-                            ]);
-                          }
-                          items.add(
-                            const PopupMenuItem(
-                              value: EntryMenuAction.deleteCollection,
-                              child: Text('Delete Collection'),
-                            ),
-                          );
-                          return items;
-                        },
-                      ),
+                            );
+                            return items;
+                          },
+                        ),
                     ],
                   ),
                   body: ListView(
@@ -292,7 +333,7 @@ class _CollectionDetailPageState extends State<CollectionDetailPage> {
                         ),
                         const SizedBox(height: 14),
                       ],
-                      _buildQueueSection(context, currentTrack),
+                      _buildQueueSection(context),
                       Row(
                         children: [
                           Text(
@@ -320,7 +361,8 @@ class _CollectionDetailPageState extends State<CollectionDetailPage> {
                       const SizedBox(height: 8),
                       if (_entry.tracks.isEmpty)
                         const Text('No songs uploaded yet.')
-                      else if (_entry.type == CollectionType.playlist)
+                      else if (_entry.type == CollectionType.playlist &&
+                          !_isReadOnly)
                         ReorderableListView.builder(
                           shrinkWrap: true,
                           physics: const NeverScrollableScrollPhysics(),
@@ -358,7 +400,10 @@ class _CollectionDetailPageState extends State<CollectionDetailPage> {
                               decoration: BoxDecoration(
                                 borderRadius: BorderRadius.circular(16),
                                 gradient: const LinearGradient(
-                                  colors: [Color(0xFF201812), Color(0xFF17110D)],
+                                  colors: [
+                                    Color(0xFF201812),
+                                    Color(0xFF17110D),
+                                  ],
                                 ),
                                 border: Border.all(
                                   color: isActive
@@ -375,8 +420,7 @@ class _CollectionDetailPageState extends State<CollectionDetailPage> {
                                   children: [
                                     if (!isLoadingThis)
                                       IconButton(
-                                        tooltip:
-                                            isPlaying ? 'Pause' : 'Play',
+                                        tooltip: isPlaying ? 'Pause' : 'Play',
                                         onPressed: () =>
                                             widget.onToggleTrack(track, _entry),
                                         icon: Icon(
@@ -388,28 +432,17 @@ class _CollectionDetailPageState extends State<CollectionDetailPage> {
                                     PopupMenuButton<_TrackMenuAction>(
                                       tooltip: 'Track options',
                                       icon: const Icon(Icons.more_vert),
-                                      onSelected: (action) {
-                                        if (action ==
-                                            _TrackMenuAction.details) {
-                                          widget.onShowTrackDetails(
-                                            track,
-                                            _entry,
-                                          );
-                                        }
-                                      },
-                                      itemBuilder: (context) => const [
-                                        PopupMenuItem(
-                                          value: _TrackMenuAction.details,
-                                          child: Text('Details'),
-                                        ),
-                                      ],
+                                      onSelected: (action) =>
+                                          _onTrackMenu(action, track),
+                                      itemBuilder: (context) =>
+                                          _trackMenuItems(track),
                                     ),
-                                    IconButton(
-                                      tooltip: 'Delete song',
-                                      onPressed: () =>
-                                          widget.onDeleteTrack(_entry.id, track),
-                                      icon: const Icon(Icons.delete_outline),
-                                    ),
+                                    if (!_isReadOnly)
+                                      IconButton(
+                                        tooltip: 'Delete song',
+                                        onPressed: () => _deleteTrack(track),
+                                        icon: const Icon(Icons.delete_outline),
+                                      ),
                                     ReorderableDragStartListener(
                                       index: index,
                                       child: const Padding(
@@ -461,8 +494,7 @@ class _CollectionDetailPageState extends State<CollectionDetailPage> {
                                   children: [
                                     if (!isLoadingThis)
                                       IconButton(
-                                        tooltip:
-                                            isPlaying ? 'Pause' : 'Play',
+                                        tooltip: isPlaying ? 'Pause' : 'Play',
                                         onPressed: () =>
                                             widget.onToggleTrack(track, _entry),
                                         icon: Icon(
@@ -474,28 +506,17 @@ class _CollectionDetailPageState extends State<CollectionDetailPage> {
                                     PopupMenuButton<_TrackMenuAction>(
                                       tooltip: 'Track options',
                                       icon: const Icon(Icons.more_vert),
-                                      onSelected: (action) {
-                                        if (action ==
-                                            _TrackMenuAction.details) {
-                                          widget.onShowTrackDetails(
-                                            track,
-                                            _entry,
-                                          );
-                                        }
-                                      },
-                                      itemBuilder: (context) => const [
-                                        PopupMenuItem(
-                                          value: _TrackMenuAction.details,
-                                          child: Text('Details'),
-                                        ),
-                                      ],
+                                      onSelected: (action) =>
+                                          _onTrackMenu(action, track),
+                                      itemBuilder: (context) =>
+                                          _trackMenuItems(track),
                                     ),
-                                    IconButton(
-                                      tooltip: 'Delete song',
-                                      onPressed: () =>
-                                          widget.onDeleteTrack(_entry.id, track),
-                                      icon: const Icon(Icons.delete_outline),
-                                    ),
+                                    if (!_isReadOnly)
+                                      IconButton(
+                                        tooltip: 'Delete song',
+                                        onPressed: () => _deleteTrack(track),
+                                        icon: const Icon(Icons.delete_outline),
+                                      ),
                                   ],
                                 ),
                                 onTap: () async {

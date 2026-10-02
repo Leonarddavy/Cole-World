@@ -76,4 +76,3 @@ class _NowPlayingEqualizerState extends State<NowPlayingEqualizer>
     );
   }
 }
-

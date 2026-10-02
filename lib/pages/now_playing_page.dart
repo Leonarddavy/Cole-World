@@ -4,6 +4,7 @@ import 'package:just_audio/just_audio.dart';
 
 import '../models/collection_models.dart';
 import '../models/playback_models.dart';
+import '../services/play_queue.dart';
 import '../ui/collection_type_ui.dart';
 import '../widgets/artwork_card.dart';
 import '../widgets/graffiti_scaffold.dart';
@@ -13,12 +14,15 @@ class NowPlayingPage extends StatelessWidget {
   const NowPlayingPage({
     super.key,
     this.title = 'Now Playing',
-    required this.entry,
+    required this.resolveEntry,
     required this.currentTrackListenable,
     required this.playerStateStream,
     required this.positionStream,
     required this.durationStream,
-    required this.onPlayTrack,
+    required this.onJumpToQueueItem,
+    required this.onRemoveFromQueue,
+    required this.onMoveQueueItem,
+    required this.onOpenLyrics,
     required this.onSeek,
     required this.onTogglePlayback,
     required this.onSkipNext,
@@ -29,26 +33,93 @@ class NowPlayingPage extends StatelessWidget {
     required this.shuffleEnabledListenable,
     required this.repeatModeListenable,
     required this.onShowTrackDetails,
+    required this.likedTrackIdsListenable,
+    required this.onToggleLike,
+    required this.sleepTimerListenable,
+    required this.onSetSleepTimer,
+    required this.onSleepAtEndOfTrack,
   });
 
   final String title;
-  final CollectionEntry? entry;
+  final CollectionEntry? Function(String id) resolveEntry;
   final ValueListenable<Track?> currentTrackListenable;
   final Stream<PlayerState> playerStateStream;
   final Stream<Duration> positionStream;
   final Stream<Duration?> durationStream;
-  final Future<void> Function(Track track, CollectionEntry entry) onPlayTrack;
+  final ValueChanged<String> onJumpToQueueItem;
+  final ValueChanged<String> onRemoveFromQueue;
+
+  /// Moves a song (by queue uid) to a position among the upcoming songs.
+  final void Function(String uid, int upcomingOffset) onMoveQueueItem;
+  final VoidCallback onOpenLyrics;
   final Future<void> Function(Duration position) onSeek;
   final VoidCallback onTogglePlayback;
   final VoidCallback onSkipNext;
   final VoidCallback onSkipPrevious;
   final VoidCallback onToggleShuffle;
   final VoidCallback onCycleRepeat;
-  final ValueListenable<List<Track>> queueListenable;
+  final ValueListenable<PlayQueueView> queueListenable;
   final ValueListenable<bool> shuffleEnabledListenable;
-  final ValueListenable<RepeatMode> repeatModeListenable;
+  final ValueListenable<PlaybackRepeatMode> repeatModeListenable;
   final Future<void> Function(Track track, CollectionEntry entry)
   onShowTrackDetails;
+  final ValueListenable<Set<String>> likedTrackIdsListenable;
+  final ValueChanged<Track> onToggleLike;
+  final ValueListenable<SleepTimerState?> sleepTimerListenable;
+
+  /// Starts a sleep timer for the given duration, or cancels it with null.
+  final ValueChanged<Duration?> onSetSleepTimer;
+  final VoidCallback onSleepAtEndOfTrack;
+
+  Future<void> _openSleepTimerSheet(BuildContext context) async {
+    final active = sleepTimerListenable.value;
+    final remaining = active?.remaining();
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) {
+        void choose(VoidCallback action) {
+          Navigator.pop(sheetContext);
+          action();
+        }
+
+        return SafeArea(
+          child: ListView(
+            shrinkWrap: true,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.bedtime_outlined),
+                title: const Text('Sleep timer'),
+                subtitle: Text(
+                  active == null
+                      ? 'Stop the music after a while.'
+                      : active.endOfTrack
+                      ? 'Stopping at the end of this song.'
+                      : 'Stopping in ${_formatRemaining(remaining!)}.',
+                ),
+              ),
+              for (final minutes in const [15, 30, 45, 60])
+                ListTile(
+                  title: Text('$minutes minutes'),
+                  onTap: () =>
+                      choose(() => onSetSleepTimer(Duration(minutes: minutes))),
+                ),
+              ListTile(
+                title: const Text('End of this song'),
+                onTap: () => choose(onSleepAtEndOfTrack),
+              ),
+              if (active != null)
+                ListTile(
+                  leading: const Icon(Icons.close),
+                  title: const Text('Turn off timer'),
+                  onTap: () => choose(() => onSetSleepTimer(null)),
+                ),
+            ],
+          ),
+        );
+      },
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -57,6 +128,30 @@ class NowPlayingPage extends StatelessWidget {
     return GraffitiScaffold(
       appBar: AppBar(
         title: Text(title),
+        actions: [
+          IconButton(
+            tooltip: 'Lyrics',
+            onPressed: onOpenLyrics,
+            icon: const Icon(Icons.lyrics_outlined),
+          ),
+          ValueListenableBuilder<SleepTimerState?>(
+            valueListenable: sleepTimerListenable,
+            builder: (context, sleepTimer, _) {
+              return IconButton(
+                tooltip: sleepTimer == null
+                    ? 'Sleep timer'
+                    : 'Sleep timer (on)',
+                color: sleepTimer == null
+                    ? null
+                    : Theme.of(context).colorScheme.secondary,
+                onPressed: () => _openSleepTimerSheet(context),
+                icon: Icon(
+                  sleepTimer == null ? Icons.bedtime_outlined : Icons.bedtime,
+                ),
+              );
+            },
+          ),
+        ],
       ),
       body: SafeArea(
         child: Padding(
@@ -71,29 +166,24 @@ class NowPlayingPage extends StatelessWidget {
                   final playing = state?.playing ?? false;
                   final processing =
                       state?.processingState ?? ProcessingState.idle;
-                  final busy = processing == ProcessingState.loading ||
+                  final busy =
+                      processing == ProcessingState.loading ||
                       processing == ProcessingState.buffering;
                   final isLoading = busy;
 
                   return ValueListenableBuilder<bool>(
                     valueListenable: shuffleEnabledListenable,
                     builder: (context, shuffleEnabled, _) {
-                      return ValueListenableBuilder<RepeatMode>(
+                      return ValueListenableBuilder<PlaybackRepeatMode>(
                         valueListenable: repeatModeListenable,
                         builder: (context, repeatMode, _) {
-                          return ValueListenableBuilder<List<Track>>(
+                          return ValueListenableBuilder<PlayQueueView>(
                             valueListenable: queueListenable,
                             builder: (context, queue, _) {
-                              final currentIndex = currentTrack == null
-                                  ? -1
-                                  : queue.indexWhere(
-                                      (track) =>
-                                          track.id == currentTrack.id,
-                                    );
-                              final upNext = currentIndex >= 0 &&
-                                      currentIndex < queue.length - 1
-                                  ? queue.sublist(currentIndex + 1)
-                                  : <Track>[];
+                              final currentEntryId = queue.current?.entryId;
+                              final entry = currentEntryId == null
+                                  ? null
+                                  : resolveEntry(currentEntryId);
 
                               return Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -103,20 +193,41 @@ class NowPlayingPage extends StatelessWidget {
                                     track: currentTrack,
                                   ),
                                   const SizedBox(height: 16),
-                                  if (currentTrack != null) ...[
-                                    Text(
-                                      currentTrack.title,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: theme.textTheme.headlineSmall,
-                                    ),
-                                    Text(
-                                      currentTrack.artist,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: theme.textTheme.bodyMedium,
-                                    ),
-                                  ] else
+                                  if (currentTrack != null)
+                                    Row(
+                                      children: [
+                                        Expanded(
+                                          child: Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: [
+                                              Text(
+                                                currentTrack.title,
+                                                maxLines: 1,
+                                                overflow: TextOverflow.ellipsis,
+                                                style: theme
+                                                    .textTheme
+                                                    .headlineSmall,
+                                              ),
+                                              Text(
+                                                currentTrack.artist,
+                                                maxLines: 1,
+                                                overflow: TextOverflow.ellipsis,
+                                                style:
+                                                    theme.textTheme.bodyMedium,
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                        _LikeButton(
+                                          track: currentTrack,
+                                          likedTrackIdsListenable:
+                                              likedTrackIdsListenable,
+                                          onToggleLike: onToggleLike,
+                                        ),
+                                      ],
+                                    )
+                                  else
                                     Text(
                                       'No track selected.',
                                       style: theme.textTheme.bodyMedium,
@@ -153,16 +264,17 @@ class NowPlayingPage extends StatelessWidget {
                                       IconButton(
                                         tooltip: playing ? 'Pause' : 'Play',
                                         iconSize: 58,
-                                        onPressed:
-                                            isLoading ? null : onTogglePlayback,
+                                        onPressed: isLoading
+                                            ? null
+                                            : onTogglePlayback,
                                         icon: isLoading
                                             ? const SizedBox(
                                                 width: 44,
                                                 height: 44,
                                                 child:
                                                     CircularProgressIndicator(
-                                                  strokeWidth: 3,
-                                                ),
+                                                      strokeWidth: 3,
+                                                    ),
                                               )
                                             : Icon(
                                                 playing
@@ -184,11 +296,12 @@ class NowPlayingPage extends StatelessWidget {
                                         tooltip: 'Repeat',
                                         iconSize: 22,
                                         onPressed: onCycleRepeat,
-                                        color: repeatMode == RepeatMode.off
+                                        color:
+                                            repeatMode == PlaybackRepeatMode.off
                                             ? Colors.white70
                                             : theme.colorScheme.secondary,
                                         icon: Icon(
-                                          repeatMode == RepeatMode.one
+                                          repeatMode == PlaybackRepeatMode.one
                                               ? Icons.repeat_one
                                               : Icons.repeat,
                                         ),
@@ -206,10 +319,7 @@ class NowPlayingPage extends StatelessWidget {
                                       if (playing)
                                         const NowPlayingEqualizer(size: 18)
                                       else
-                                        const Icon(
-                                          Icons.queue_music,
-                                          size: 18,
-                                        ),
+                                        const Icon(Icons.queue_music, size: 18),
                                     ],
                                   ),
                                   if (shuffleEnabled)
@@ -219,56 +329,13 @@ class NowPlayingPage extends StatelessWidget {
                                     ),
                                   const SizedBox(height: 8),
                                   Expanded(
-                                    child: Builder(
-                                      builder: (context) {
-                                        final activeEntry = entry;
-                                        if (activeEntry == null) {
-                                          return Center(
-                                            child: Text(
-                                              'No queue available.',
-                                              style: theme.textTheme.bodySmall,
-                                            ),
-                                          );
-                                        }
-                                        final entryValue = activeEntry;
-                                        if (currentTrack != null &&
-                                            upNext.isEmpty) {
-                                          return Center(
-                                            child: Text(
-                                              'You\'re at the end of the queue.',
-                                              style: theme.textTheme.bodySmall,
-                                            ),
-                                          );
-                                        }
-
-                                        final showingFullQueue =
-                                            upNext.isEmpty &&
-                                                currentTrack == null;
-                                        final visibleQueue =
-                                            showingFullQueue ? queue : upNext;
-
-                                        return ListView.separated(
-                                          itemCount: visibleQueue.length,
-                                          separatorBuilder: (context, index) =>
-                                              const SizedBox(height: 6),
-                                          itemBuilder: (context, index) {
-                                            final track = visibleQueue[index];
-                                            final isActive =
-                                                track.id == currentTrack?.id;
-                                            return _QueueTile(
-                                              track: track,
-                                              isActive: isActive,
-                                              onTap: () =>
-                                                  onPlayTrack(track, entryValue),
-                                              onDetails: () =>
-                                                  onShowTrackDetails(
-                                                track,
-                                                entryValue,
-                                              ),
-                                            );
-                                          },
-                                        );
-                                      },
+                                    child: _UpNextList(
+                                      queue: queue,
+                                      resolveEntry: resolveEntry,
+                                      onJump: onJumpToQueueItem,
+                                      onRemove: onRemoveFromQueue,
+                                      onMove: onMoveQueueItem,
+                                      onShowTrackDetails: onShowTrackDetails,
                                     ),
                                   ),
                                 ],
@@ -289,11 +356,37 @@ class NowPlayingPage extends StatelessWidget {
   }
 }
 
-class _NowPlayingHero extends StatelessWidget {
-  const _NowPlayingHero({
-    required this.entry,
+class _LikeButton extends StatelessWidget {
+  const _LikeButton({
     required this.track,
+    required this.likedTrackIdsListenable,
+    required this.onToggleLike,
   });
+
+  final Track track;
+  final ValueListenable<Set<String>> likedTrackIdsListenable;
+  final ValueChanged<Track> onToggleLike;
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<Set<String>>(
+      valueListenable: likedTrackIdsListenable,
+      builder: (context, likedIds, _) {
+        final liked = likedIds.contains(track.id);
+        return IconButton(
+          tooltip: liked ? 'Remove from Liked Songs' : 'Add to Liked Songs',
+          iconSize: 28,
+          color: liked ? const Color(0xFFFFB547) : Colors.white70,
+          onPressed: () => onToggleLike(track),
+          icon: Icon(liked ? Icons.favorite : Icons.favorite_border),
+        );
+      },
+    );
+  }
+}
+
+class _NowPlayingHero extends StatelessWidget {
+  const _NowPlayingHero({required this.entry, required this.track});
 
   final CollectionEntry? entry;
   final Track? track;
@@ -324,6 +417,7 @@ class _NowPlayingHero extends StatelessWidget {
               height: 240,
               child: ArtworkCard(
                 entry: entry!,
+                imagePath: track?.artworkPath,
                 borderRadius: BorderRadius.circular(22),
                 heroTag: 'now_playing_${entry!.id}',
               ),
@@ -337,15 +431,10 @@ class _NowPlayingHero extends StatelessWidget {
                   colors: [Color(0xFF3A2A17), Color(0xFF15110E)],
                 ),
               ),
-              child: const Center(
-                child: Icon(Icons.album, size: 64),
-              ),
+              child: const Center(child: Icon(Icons.album, size: 64)),
             ),
           const SizedBox(height: 12),
-          Text(
-            label,
-            style: theme.textTheme.titleMedium,
-          ),
+          Text(label, style: theme.textTheme.titleMedium),
           if (track != null) ...[
             const SizedBox(height: 4),
             Text(
@@ -407,26 +496,130 @@ class _PlaybackScrubber extends StatelessWidget {
                     value: clampedMillis,
                     onChanged: enableSeek
                         ? (value) =>
-                            onSeek(Duration(milliseconds: value.round()))
+                              onSeek(Duration(milliseconds: value.round()))
                         : null,
                   ),
                 ),
                 Row(
                   children: [
-                    Text(
-                      _formatDuration(position),
-                      style: textTheme.bodySmall,
-                    ),
+                    Text(_formatDuration(position), style: textTheme.bodySmall),
                     const Spacer(),
-                    Text(
-                      _formatDuration(duration),
-                      style: textTheme.bodySmall,
-                    ),
+                    Text(_formatDuration(duration), style: textTheme.bodySmall),
                   ],
                 ),
               ],
             );
           },
+        );
+      },
+    );
+  }
+}
+
+enum _QueueTileAction { remove, details }
+
+class _UpNextList extends StatelessWidget {
+  const _UpNextList({
+    required this.queue,
+    required this.resolveEntry,
+    required this.onJump,
+    required this.onRemove,
+    required this.onMove,
+    required this.onShowTrackDetails,
+  });
+
+  final PlayQueueView queue;
+  final CollectionEntry? Function(String id) resolveEntry;
+  final ValueChanged<String> onJump;
+  final ValueChanged<String> onRemove;
+  final void Function(String uid, int upcomingOffset) onMove;
+  final Future<void> Function(Track track, CollectionEntry entry)
+  onShowTrackDetails;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    if (queue.current == null) {
+      return Center(
+        child: Text('No queue available.', style: theme.textTheme.bodySmall),
+      );
+    }
+    final userIndices = queue.upNextUserIndices;
+    final contextIndices = queue.upNextContextIndices;
+    if (userIndices.isEmpty && contextIndices.isEmpty) {
+      return Center(
+        child: Text(
+          'You\'re at the end of the queue.',
+          style: theme.textTheme.bodySmall,
+        ),
+      );
+    }
+
+    final contextId = queue.contextEntryId;
+    final contextTitle = contextId == null
+        ? null
+        : resolveEntry(contextId)?.title;
+
+    final upcoming = [...userIndices, ...contextIndices];
+
+    Widget header(String label) => Padding(
+      padding: const EdgeInsets.only(top: 4, bottom: 6),
+      child: Text(label, style: theme.textTheme.labelLarge),
+    );
+
+    // Section headers ride along with the first song of each section, since
+    // a reorderable list can only contain draggable items.
+    return ReorderableListView.builder(
+      buildDefaultDragHandles: false,
+      itemCount: upcoming.length,
+      onReorder: (oldIndex, newIndex) {
+        if (newIndex > oldIndex) {
+          newIndex -= 1;
+        }
+        onMove(queue.items[upcoming[oldIndex]].uid, newIndex);
+      },
+      itemBuilder: (context, position) {
+        final index = upcoming[position];
+        final item = queue.items[index];
+        final entry = resolveEntry(item.entryId);
+        final String? sectionLabel;
+        if (position == 0 && item.userQueued) {
+          sectionLabel = 'Next in queue';
+        } else if (!item.userQueued &&
+            (position == 0 || queue.items[upcoming[position - 1]].userQueued)) {
+          sectionLabel = contextTitle == null
+              ? 'Next up'
+              : 'Next from: $contextTitle';
+        } else {
+          sectionLabel = null;
+        }
+        return Padding(
+          key: ValueKey(item.uid),
+          padding: const EdgeInsets.only(bottom: 6),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (sectionLabel != null) header(sectionLabel),
+              _QueueTile(
+                track: item.track,
+                isActive: false,
+                isUserQueued: item.userQueued,
+                onTap: () => onJump(item.uid),
+                onRemove: () => onRemove(item.uid),
+                onDetails: entry == null
+                    ? null
+                    : () => onShowTrackDetails(item.track, entry),
+                dragHandle: ReorderableDragStartListener(
+                  index: position,
+                  child: const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 4),
+                    child: Icon(Icons.drag_handle),
+                  ),
+                ),
+              ),
+            ],
+          ),
         );
       },
     );
@@ -439,12 +632,18 @@ class _QueueTile extends StatelessWidget {
     required this.isActive,
     required this.onTap,
     required this.onDetails,
+    this.isUserQueued = false,
+    this.onRemove,
+    this.dragHandle,
   });
 
   final Track track;
   final bool isActive;
+  final bool isUserQueued;
   final VoidCallback? onTap;
   final VoidCallback? onDetails;
+  final VoidCallback? onRemove;
+  final Widget? dragHandle;
 
   @override
   Widget build(BuildContext context) {
@@ -466,7 +665,11 @@ class _QueueTile extends StatelessWidget {
           child: Row(
             children: [
               Icon(
-                isActive ? Icons.music_note : Icons.queue_music,
+                isActive
+                    ? Icons.music_note
+                    : isUserQueued
+                    ? Icons.playlist_add_check
+                    : Icons.queue_music,
                 size: 18,
               ),
               const SizedBox(width: 10),
@@ -489,11 +692,31 @@ class _QueueTile extends StatelessWidget {
                 ),
               ),
               if (isActive) const NowPlayingEqualizer(size: 16),
-              IconButton(
-                tooltip: 'Track details',
-                onPressed: onDetails,
+              PopupMenuButton<_QueueTileAction>(
+                tooltip: 'Queue options',
                 icon: const Icon(Icons.more_vert),
+                onSelected: (action) {
+                  switch (action) {
+                    case _QueueTileAction.remove:
+                      onRemove?.call();
+                    case _QueueTileAction.details:
+                      onDetails?.call();
+                  }
+                },
+                itemBuilder: (context) => [
+                  if (onRemove != null)
+                    const PopupMenuItem(
+                      value: _QueueTileAction.remove,
+                      child: Text('Remove from queue'),
+                    ),
+                  if (onDetails != null)
+                    const PopupMenuItem(
+                      value: _QueueTileAction.details,
+                      child: Text('Details'),
+                    ),
+                ],
               ),
+              ?dragHandle,
             ],
           ),
         ),
@@ -509,4 +732,12 @@ String _formatDuration(Duration duration) {
   final minutes = duration.inMinutes;
   final seconds = duration.inSeconds % 60;
   return '$minutes:${seconds.toString().padLeft(2, '0')}';
+}
+
+String _formatRemaining(Duration remaining) {
+  final minutes = remaining.inMinutes;
+  if (minutes >= 1) {
+    return '$minutes min';
+  }
+  return '${remaining.inSeconds} sec';
 }

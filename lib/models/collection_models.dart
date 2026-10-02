@@ -21,6 +21,14 @@ class CollectionEntry {
   final String? thumbnailPath;
   final String? thumbnailDataBase64;
 
+  /// Smart playlists (Liked Songs, On Repeat) are generated from listening
+  /// data rather than stored, so they are read-only and never persisted.
+  static const String smartIdPrefix = 'smart_';
+
+  static bool isSmartId(String id) => id.startsWith(smartIdPrefix);
+
+  bool get isSmart => isSmartId(id);
+
   CollectionEntry copyWith({
     String? title,
     String? history,
@@ -38,6 +46,24 @@ class CollectionEntry {
       tracks: tracks ?? this.tracks,
       thumbnailPath: thumbnailPath ?? this.thumbnailPath,
       thumbnailDataBase64: thumbnailDataBase64 ?? this.thumbnailDataBase64,
+    );
+  }
+
+  /// Replaces both thumbnail fields at once so a stale value from the
+  /// previous thumbnail (which [copyWith] would keep) can't take precedence.
+  CollectionEntry withThumbnail({
+    String? thumbnailPath,
+    String? thumbnailDataBase64,
+  }) {
+    return CollectionEntry(
+      id: id,
+      type: type,
+      title: title,
+      history: history,
+      featuredArtists: featuredArtists,
+      tracks: tracks,
+      thumbnailPath: thumbnailPath,
+      thumbnailDataBase64: thumbnailDataBase64,
     );
   }
 
@@ -97,6 +123,7 @@ class Track {
     required this.title,
     required this.artist,
     required this.filePath,
+    this.artworkPath,
   });
 
   final String id;
@@ -104,12 +131,32 @@ class Track {
   final String artist;
   final String filePath;
 
+  /// Cover art extracted from the audio file's tags, stored in app storage.
+  final String? artworkPath;
+
+  Track copyWith({String? title, String? artist, String? artworkPath}) {
+    return Track(
+      id: id,
+      title: title ?? this.title,
+      artist: artist ?? this.artist,
+      filePath: filePath,
+      artworkPath: artworkPath ?? this.artworkPath,
+    );
+  }
+
+  bool hasSameInfoAs(Track other) {
+    return title == other.title &&
+        artist == other.artist &&
+        artworkPath == other.artworkPath;
+  }
+
   Map<String, dynamic> toJson() {
     return {
       'id': id,
       'title': title,
       'artist': artist,
       'filePath': _sanitizePersistedFilePath(filePath),
+      if (artworkPath != null) 'artworkPath': artworkPath,
     };
   }
 
@@ -120,6 +167,9 @@ class Track {
       title: (json['title'] ?? '').toString(),
       artist: (json['artist'] ?? '').toString(),
       filePath: _sanitizePersistedFilePath(rawPath),
+      artworkPath: CollectionEntry._sanitizePersistedPath(
+        json['artworkPath']?.toString(),
+      ),
     );
   }
 

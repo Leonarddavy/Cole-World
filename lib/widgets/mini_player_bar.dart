@@ -23,6 +23,8 @@ class MiniPlayerBar extends StatelessWidget {
     required this.onNext,
     required this.onToggleShuffle,
     required this.shuffleEnabled,
+    required this.isLiked,
+    required this.onToggleLike,
     this.onOpenNowPlaying,
     this.isExpanded = true,
     this.onToggleSize,
@@ -41,6 +43,8 @@ class MiniPlayerBar extends StatelessWidget {
   final Future<void> Function() onNext;
   final VoidCallback onToggleShuffle;
   final bool shuffleEnabled;
+  final bool isLiked;
+  final VoidCallback onToggleLike;
   final VoidCallback? onOpenNowPlaying;
   final bool isExpanded;
   final VoidCallback? onToggleSize;
@@ -100,6 +104,7 @@ class MiniPlayerBar extends StatelessWidget {
                             height: 48,
                             child: ArtworkCard(
                               entry: entry!,
+                              imagePath: track.artworkPath,
                               borderRadius: BorderRadius.circular(12),
                               heroTag: 'now_playing_${entry!.id}',
                             ),
@@ -203,6 +208,18 @@ class MiniPlayerBar extends StatelessWidget {
                             style: Theme.of(context).textTheme.bodySmall,
                           ),
                           const Spacer(),
+                          IconButton(
+                            tooltip: isLiked
+                                ? 'Remove from Liked Songs'
+                                : 'Add to Liked Songs',
+                            color: isLiked
+                                ? const Color(0xFFFFB547)
+                                : Colors.white70,
+                            onPressed: onToggleLike,
+                            icon: Icon(
+                              isLiked ? Icons.favorite : Icons.favorite_border,
+                            ),
+                          ),
                           IconButton(
                             tooltip: 'Previous',
                             onPressed: () => onPrevious(),

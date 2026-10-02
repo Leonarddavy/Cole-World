@@ -13,21 +13,29 @@ import 'package:audio_session/audio_session.dart';
 import '../data/seed_data.dart';
 import '../models/collection_models.dart';
 import '../models/entry_menu_action.dart';
+import '../models/lyrics.dart';
 import '../models/playback_models.dart';
 import '../models/story_content.dart';
 import '../services/app_prefs.dart';
 import '../services/library_storage.dart';
+import '../services/lyrics_store.dart';
+import '../services/online_lyrics.dart';
+import '../services/play_queue.dart';
+import '../services/smart_playlists.dart';
 import '../theme/app_theme.dart';
 import '../ui/collection_type_ui.dart';
+import '../utils/audio_tags.dart';
 import '../utils/local_fs.dart';
 import '../utils/object_url.dart';
 import '../widgets/graffiti_backdrop.dart';
 import '../widgets/floating_nav_bar.dart';
 import '../widgets/graffiti_scaffold.dart';
 import '../widgets/mini_player_bar.dart';
+import '../widgets/track_queue_menu_button.dart';
 import 'artist_history_page.dart';
 import 'collection_detail_page.dart';
 import 'library_page.dart';
+import 'lyrics_page.dart';
 import 'now_playing_page.dart';
 import 'splash_catalog_page.dart';
 
@@ -53,14 +61,31 @@ class _HomeShellState extends State<HomeShell> {
   final AudioPlayer _audioPlayer = AudioPlayer();
   final AppPrefs _prefs = const AppPrefs();
   final LibraryStorage _libraryStorage = const LibraryStorage();
+  final LyricsStore _lyricsStore = const LyricsStore();
+
+  /// Lyrics already looked up this session (null = none found).
+  final Map<String, Lyrics?> _lyricsCache = {};
+  final LrclibClient _lrclib = LrclibClient();
+
+  /// Opt-in: look songs up on LRCLIB when no local lyrics exist.
+  final ValueNotifier<bool> _onlineLyricsListenable = ValueNotifier(false);
   final Random _random = Random();
   final Set<String> _ownedObjectUrls = {};
   final ValueNotifier<Track?> _currentTrackListenable = ValueNotifier(null);
   final ValueNotifier<String?> _pendingTrackIdListenable = ValueNotifier(null);
-  final ValueNotifier<List<Track>> _queueListenable = ValueNotifier(const []);
+  final ValueNotifier<PlayQueueView> _queueListenable = ValueNotifier(
+    PlayQueueView.empty,
+  );
+
+  /// Every change to the player's playlist runs through this chain so the
+  /// queue mirror and the player can never be updated out of order.
+  Future<void> _queueOpChain = Future.value();
+
+  /// The queue saved by the previous launch, consumed by session restore.
+  Object? _savedQueueJson;
   final ValueNotifier<bool> _shuffleEnabledListenable = ValueNotifier(false);
-  final ValueNotifier<RepeatMode> _repeatModeListenable = ValueNotifier(
-    RepeatMode.off,
+  final ValueNotifier<PlaybackRepeatMode> _repeatModeListenable = ValueNotifier(
+    PlaybackRepeatMode.off,
   );
   final ValueNotifier<Duration> _positionListenable = ValueNotifier(
     Duration.zero,
@@ -68,6 +93,17 @@ class _HomeShellState extends State<HomeShell> {
   final ValueNotifier<Duration> _durationListenable = ValueNotifier(
     Duration.zero,
   );
+  final ValueNotifier<Set<String>> _likedIdsListenable = ValueNotifier(
+    const {},
+  );
+  final ValueNotifier<SleepTimerState?> _sleepTimerListenable = ValueNotifier(
+    null,
+  );
+
+  /// Newest like first.
+  List<String> _likedTrackIds = const [];
+  Map<String, int> _playCounts = const {};
+  Timer? _sleepTimer;
 
   AudioSession? _audioSession;
   StreamSubscription<AudioInterruptionEvent>? _audioInterruptionSub;
@@ -89,7 +125,7 @@ class _HomeShellState extends State<HomeShell> {
   bool _isPlaying = false;
   bool _miniPlayerExpanded = true;
   bool _shuffleEnabled = false;
-  RepeatMode _repeatMode = RepeatMode.off;
+  PlaybackRepeatMode _repeatMode = PlaybackRepeatMode.off;
   String? _shuffleQueueEntryId;
   List<String> _shuffleQueue = [];
   List<_RecentPlayPointer> _recentPlays = const [];
@@ -100,17 +136,32 @@ class _HomeShellState extends State<HomeShell> {
   List<String> _customBackdropSources = const [];
   StoryContent _storyContent = StoryContent.defaults();
 
+  /// Saving before the stored prefs are loaded would overwrite them with
+  /// defaults, so persistence is held off until hydration completes.
+  bool _prefsHydrated = false;
+  Future<bool> _prefsWriteChain = Future.value(true);
+  Duration _lastSavedPosition = Duration.zero;
+  late final AppLifecycleListener _lifecycleListener;
+
+  static const Duration _sessionSaveInterval = Duration(seconds: 15);
+
   @override
   void initState() {
     super.initState();
     _themeSettings = widget.initialThemeSettings;
     GraffitiBackdrop.setCustomSources(_customBackdropSources);
     unawaited(_initAudioSession());
-    unawaited(_hydrateLibrary());
-    unawaited(_hydratePrefs());
+    unawaited(_hydrateAndRestoreSession());
+    _lifecycleListener = AppLifecycleListener(
+      onHide: _saveSessionNow,
+      onPause: _saveSessionNow,
+    );
     _playerStateSub = _audioPlayer.playerStateStream.listen((state) {
       if (!mounted) {
         return;
+      }
+      if (_isPlaying && !state.playing) {
+        _saveSessionNow();
       }
       final processing = state.processingState;
       setState(() {
@@ -128,6 +179,11 @@ class _HomeShellState extends State<HomeShell> {
         return;
       }
       _setPlaybackPosition(position);
+      if (_isPlaying &&
+          (position - _lastSavedPosition).abs() >= _sessionSaveInterval) {
+        _saveSessionNow();
+      }
+      _checkSleepAtEndOfTrack(position);
     });
     _durationSub = _audioPlayer.durationStream.listen((duration) {
       if (!mounted) {
@@ -142,6 +198,11 @@ class _HomeShellState extends State<HomeShell> {
 
   @override
   void dispose() {
+    _lifecycleListener.dispose();
+    _sleepTimer?.cancel();
+    _likedIdsListenable.dispose();
+    _sleepTimerListenable.dispose();
+    _onlineLyricsListenable.dispose();
     for (final url in _ownedObjectUrls) {
       revokeObjectUrl(url);
     }
@@ -163,7 +224,85 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   List<CollectionEntry> _ofType(CollectionType type) {
-    return _entries.where((entry) => entry.type == type).toList();
+    final stored = _entries.where((entry) => entry.type == type).toList();
+    if (type != CollectionType.playlist) {
+      return stored;
+    }
+    // Smart playlists lead the Playlist tab once they have something in them.
+    final smart = [
+      for (final id in const [likedSongsEntryId, onRepeatEntryId])
+        _smartEntry(id),
+    ].whereType<CollectionEntry>().where((entry) => entry.tracks.isNotEmpty);
+    return [...smart, ...stored];
+  }
+
+  CollectionEntry? _smartEntry(String id) {
+    return buildSmartEntry(
+      id,
+      entries: _entries,
+      likedTrackIds: _likedTrackIds,
+      playCounts: _playCounts,
+    );
+  }
+
+  bool _isLiked(Track track) => _likedIdsListenable.value.contains(track.id);
+
+  void _toggleLike(Track track) {
+    final wasLiked = _isLiked(track);
+    final next = [..._likedTrackIds]..remove(track.id);
+    if (!wasLiked) {
+      next.insert(0, track.id);
+    }
+    setState(() {
+      _likedTrackIds = next;
+    });
+    _likedIdsListenable.value = next.toSet();
+    unawaited(_persistPrefs(notifyOnFailure: false));
+    _showMessage(
+      wasLiked ? 'Removed from Liked Songs.' : 'Added to Liked Songs.',
+    );
+  }
+
+  void _setSleepTimer(Duration? duration) {
+    _sleepTimer?.cancel();
+    _sleepTimer = null;
+    if (duration == null) {
+      _sleepTimerListenable.value = null;
+      _showMessage('Sleep timer off.');
+      return;
+    }
+    _sleepTimer = Timer(duration, _onSleepTimerFired);
+    _sleepTimerListenable.value = SleepTimerState.at(
+      DateTime.now().add(duration),
+    );
+    _showMessage('Music will stop in ${duration.inMinutes} min.');
+  }
+
+  void _setSleepAtEndOfTrack() {
+    _sleepTimer?.cancel();
+    _sleepTimer = null;
+    _sleepTimerListenable.value = const SleepTimerState.endOfTrack();
+    _showMessage('Music will stop at the end of this song.');
+  }
+
+  void _onSleepTimerFired() {
+    _sleepTimer?.cancel();
+    _sleepTimer = null;
+    _sleepTimerListenable.value = null;
+    unawaited(_audioPlayer.pause());
+  }
+
+  /// Position updates arrive at most ~200ms apart while playing, so a 350ms
+  /// window reliably catches the end of the song before the next one starts.
+  void _checkSleepAtEndOfTrack(Duration position) {
+    if (_sleepTimerListenable.value?.endOfTrack != true || !_isPlaying) {
+      return;
+    }
+    final duration = _durationListenable.value;
+    if (duration > Duration.zero &&
+        position >= duration - const Duration(milliseconds: 350)) {
+      _onSleepTimerFired();
+    }
   }
 
   List<Track> _allSingleTracks() {
@@ -200,6 +339,9 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   CollectionEntry? _entryById(String id) {
+    if (CollectionEntry.isSmartId(id)) {
+      return _smartEntry(id);
+    }
     for (final entry in _entries) {
       if (entry.id == id) {
         return entry;
@@ -254,6 +396,7 @@ class _HomeShellState extends State<HomeShell> {
     }
     setState(() {
       _recentPlays = next;
+      _playCounts = {..._playCounts, trackId: (_playCounts[trackId] ?? 0) + 1};
     });
     unawaited(_persistPrefs(notifyOnFailure: false));
   }
@@ -305,10 +448,84 @@ class _HomeShellState extends State<HomeShell> {
     });
   }
 
-  Future<void> _hydratePrefs() async {
-    final prefs = await _prefs.load();
+  Future<void> _hydrateAndRestoreSession() async {
+    // Load both in parallel; the session can only be resolved once the
+    // library it points into is available.
+    final sessionFuture = _hydratePrefs();
+    await _hydrateLibrary();
+    final session = await sessionFuture;
     if (!mounted) {
       return;
+    }
+    await _restoreLastSession(session);
+  }
+
+  /// Loads the track from the previous launch, paused at its saved position.
+  Future<void> _restoreLastSession(_LastSession? session) async {
+    // Skip if the user already started something while we were loading.
+    if (session == null || _currentTrack != null) {
+      return;
+    }
+    final playable = {
+      for (final track in tracksById(_entries).values)
+        if (_isTrackFileAvailable(track)) track.id: track,
+    };
+    final savedQueue = queueFromJson(
+      _savedQueueJson,
+      resolveTrack: (id) => playable[id],
+    );
+    _savedQueueJson = null;
+
+    final PlayQueueView Function(PlayQueueView) compose;
+    final Track track;
+    final String entryId;
+    final savedCurrent = savedQueue?.current;
+    if (savedCurrent != null && savedCurrent.track.id == session.trackId) {
+      // Bring back the exact queue, including songs the user lined up.
+      track = savedCurrent.track;
+      entryId = savedCurrent.entryId;
+      compose = (_) => savedQueue!;
+    } else {
+      final entry = _entryById(session.entryId);
+      final found = entry == null ? null : _trackById(entry, session.trackId);
+      if (entry == null || found == null || playable[found.id] == null) {
+        return;
+      }
+      track = found;
+      entryId = entry.id;
+      compose = (previous) => startQueue(
+        previous,
+        startTrack: found,
+        context: _queueForEntry(entry),
+        contextEntryId: entry.id,
+      );
+    }
+
+    setState(() {
+      _currentTrack = track;
+      _currentEntryId = entryId;
+      _currentTrackListenable.value = track;
+    });
+    _setPlaybackPosition(session.position);
+    _lastSavedPosition = session.position;
+    try {
+      await _loadQueue(compose, position: session.position, autoplay: false);
+    } catch (error, stackTrace) {
+      _logError('restoreLastSession', error, stackTrace);
+      await _stopAndClearCurrentTrack();
+    }
+  }
+
+  void _saveSessionNow() {
+    _lastSavedPosition = _position;
+    unawaited(_persistPrefs(notifyOnFailure: false));
+  }
+
+  /// Returns the session saved by the previous launch, if any.
+  Future<_LastSession?> _hydratePrefs() async {
+    final prefs = await _prefs.load();
+    if (!mounted) {
+      return null;
     }
     final showStory = prefs['showStoryTab'];
     final showLaunch = prefs['showLaunchTab'];
@@ -321,7 +538,30 @@ class _HomeShellState extends State<HomeShell> {
     );
     final storyContent = StoryContent.fromJson(prefs['storyContent']);
     final recentPlays = _parseRecentPlays(prefs['recentPlays']);
+    final lastSession = _LastSession.fromJson(prefs['lastSession']);
+    _savedQueueJson = prefs['queue'];
+    final likedTrackIds = _parseStringList(prefs['likedTrackIds']);
+    final rawCounts = prefs['playCounts'];
+    final playCounts = <String, int>{
+      if (rawCounts is Map)
+        for (final item in rawCounts.entries)
+          if (item.value is num && (item.value as num) > 0)
+            item.key.toString(): (item.value as num).toInt(),
+    };
+    final shuffle = prefs['shuffleEnabled'];
+    final repeatMode = PlaybackRepeatMode.values.firstWhere(
+      (mode) => mode.name == prefs['repeatMode'],
+      orElse: () => PlaybackRepeatMode.off,
+    );
+    _likedIdsListenable.value = likedTrackIds.toSet();
+    _onlineLyricsListenable.value = prefs['onlineLyrics'] == true;
     setState(() {
+      _likedTrackIds = likedTrackIds;
+      _playCounts = playCounts;
+      _shuffleEnabled = shuffle is bool ? shuffle : false;
+      _shuffleEnabledListenable.value = _shuffleEnabled;
+      _repeatMode = repeatMode;
+      _repeatModeListenable.value = repeatMode;
       _showStoryTab = showStory is bool ? showStory : true;
       _showLaunchTab = showLaunch is bool ? showLaunch : true;
       _isEditMode = editMode is bool ? editMode : false;
@@ -333,6 +573,8 @@ class _HomeShellState extends State<HomeShell> {
     });
     GraffitiBackdrop.setCustomSources(customBackdropSources);
     widget.onThemeSettingsChanged(themeSettings);
+    _prefsHydrated = true;
+    return lastSession;
   }
 
   List<_RecentPlayPointer> _parseRecentPlays(Object? raw) {
@@ -388,7 +630,27 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   Future<void> _persistPrefs({bool notifyOnFailure = true}) async {
-    final success = await _prefs.save({
+    if (!_prefsHydrated) {
+      return;
+    }
+    final entryId = _currentEntryId;
+    final track = _currentTrack;
+    final snapshot = <String, dynamic>{
+      'lastSession': entryId == null || track == null
+          ? null
+          : _LastSession(
+              entryId: entryId,
+              trackId: track.id,
+              position: _position,
+            ).toJson(),
+      'shuffleEnabled': _shuffleEnabled,
+      'repeatMode': _repeatMode.name,
+      'queue': _queueListenable.value.current == null
+          ? null
+          : queueToJson(_queueListenable.value),
+      'likedTrackIds': _likedTrackIds,
+      'onlineLyrics': _onlineLyricsListenable.value,
+      'playCounts': _playCounts,
       'showStoryTab': _showStoryTab,
       'showLaunchTab': _showLaunchTab,
       'editMode': _isEditMode,
@@ -396,7 +658,11 @@ class _HomeShellState extends State<HomeShell> {
       'themeSettings': _themeSettings.toJson(),
       'storyContent': _storyContent.toJson(),
       'recentPlays': _recentPlays.map((item) => item.toJson()).toList(),
-    });
+    };
+    // Serialize writes so an older snapshot can never land after a newer one.
+    final write = _prefsWriteChain.then((_) => _prefs.save(snapshot));
+    _prefsWriteChain = write.catchError((Object _) => false);
+    final success = await write;
     if (!success && notifyOnFailure) {
       _showMessage('Could not save app preferences.');
     }
@@ -438,40 +704,33 @@ class _HomeShellState extends State<HomeShell> {
       if (!enabled) {
         _shuffleQueueEntryId = null;
         _shuffleQueue = [];
-      } else {
-        final entryId = _currentEntryId;
-        if (entryId != null) {
-          final entry = _entryById(entryId);
-          if (entry != null) {
-            _ensureShuffleQueue(entry);
-          }
-        }
       }
-      _refreshQueueForCurrentEntry();
     });
     if (changed) {
-      unawaited(_rebuildCurrentAudioSourcePreservingTrack());
+      unawaited(_rebuildQueueFromContext());
+      _saveSessionNow();
     }
   }
 
   void _cycleRepeatMode() {
     setState(() {
       final nextIndex =
-          (RepeatMode.values.indexOf(_repeatMode) + 1) %
-          RepeatMode.values.length;
-      _repeatMode = RepeatMode.values[nextIndex];
+          (PlaybackRepeatMode.values.indexOf(_repeatMode) + 1) %
+          PlaybackRepeatMode.values.length;
+      _repeatMode = PlaybackRepeatMode.values[nextIndex];
       _repeatModeListenable.value = _repeatMode;
     });
     unawaited(_applyPlayerLoopMode());
+    _saveSessionNow();
   }
 
-  LoopMode _loopModeForRepeatMode(RepeatMode mode) {
+  LoopMode _loopModeForRepeatMode(PlaybackRepeatMode mode) {
     switch (mode) {
-      case RepeatMode.off:
+      case PlaybackRepeatMode.off:
         return LoopMode.off;
-      case RepeatMode.all:
+      case PlaybackRepeatMode.all:
         return LoopMode.all;
-      case RepeatMode.one:
+      case PlaybackRepeatMode.one:
         return LoopMode.one;
     }
   }
@@ -502,14 +761,7 @@ class _HomeShellState extends State<HomeShell> {
 
   void _applyThemeSettings(AppThemeSettings next, {bool persist = true}) {
     final normalized = _normalizedThemeSettings(next);
-    final changed =
-        _themeSettings.primaryColorValue != normalized.primaryColorValue ||
-        _themeSettings.secondaryColorValue != normalized.secondaryColorValue ||
-        _themeSettings.backgroundColorValue !=
-            normalized.backgroundColorValue ||
-        _themeSettings.displayFontKey != normalized.displayFontKey ||
-        _themeSettings.bodyFontKey != normalized.bodyFontKey;
-    if (!changed) {
+    if (_themeSettings == normalized) {
       return;
     }
     setState(() {
@@ -537,13 +789,6 @@ class _HomeShellState extends State<HomeShell> {
     }
     _applyThemeSettings(next);
     _showMessage('Appearance updated.');
-  }
-
-  Future<String?> _backgroundImageLibraryDirPath() async {
-    if (kIsWeb) {
-      return null;
-    }
-    return ensureAppSubdirectory('background_images');
   }
 
   String _imageMimeTypeForFileName(String fileName) {
@@ -576,7 +821,16 @@ class _HomeShellState extends State<HomeShell> {
       return sourcePath.isEmpty ? null : sourcePath;
     }
 
-    if (sourcePath.isEmpty) {
+    return _copyImageIntoAppDirectory(sourcePath, 'background_images');
+  }
+
+  /// Copies a picked image into an app-owned directory so it survives the
+  /// picker's cache being cleared. Returns null if the source is unreadable.
+  Future<String?> _copyImageIntoAppDirectory(
+    String sourcePath,
+    String directoryName,
+  ) async {
+    if (kIsWeb || sourcePath.isEmpty) {
       return null;
     }
     final uri = _audioUriFromPath(sourcePath);
@@ -588,17 +842,14 @@ class _HomeShellState extends State<HomeShell> {
       return null;
     }
 
-    final backgroundDir = await _backgroundImageLibraryDirPath();
-    if (backgroundDir == null) {
-      return sourceFilePath;
-    }
-    if (path.isWithin(backgroundDir, sourceFilePath)) {
+    final targetDir = await ensureAppSubdirectory(directoryName);
+    if (targetDir == null || path.isWithin(targetDir, sourceFilePath)) {
       return sourceFilePath;
     }
 
     final extension = path.extension(sourceFilePath);
     final targetPath = path.join(
-      backgroundDir,
+      targetDir,
       '${_newId()}${extension.isEmpty ? '.jpg' : extension}',
     );
     try {
@@ -608,9 +859,17 @@ class _HomeShellState extends State<HomeShell> {
       );
       return copied ?? sourceFilePath;
     } catch (error, stackTrace) {
-      _logError('persistBackdropImageFile', error, stackTrace);
+      _logError('copyImageIntoAppDirectory', error, stackTrace);
       return null;
     }
+  }
+
+  Future<String?> _persistThumbnailPath(String? rawPath) async {
+    final trimmed = rawPath?.trim() ?? '';
+    if (trimmed.isEmpty) {
+      return null;
+    }
+    return await _copyImageIntoAppDirectory(trimmed, 'thumbnails') ?? trimmed;
   }
 
   Future<void> _uploadBackdropImages() async {
@@ -790,17 +1049,19 @@ class _HomeShellState extends State<HomeShell> {
     if (track == null) {
       return;
     }
-    final entry = _currentEntryId == null ? null : _entryById(_currentEntryId!);
     await Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => NowPlayingPage(
           title: title,
-          entry: entry,
+          resolveEntry: _entryById,
           currentTrackListenable: _currentTrackListenable,
           playerStateStream: _audioPlayer.playerStateStream,
           positionStream: _audioPlayer.positionStream,
           durationStream: _audioPlayer.durationStream,
-          onPlayTrack: _playTrackFromEntry,
+          onJumpToQueueItem: _jumpToQueueItem,
+          onRemoveFromQueue: _removeQueueItem,
+          onMoveQueueItem: _moveQueueItem,
+          onOpenLyrics: _openLyrics,
           onSeek: _seekTo,
           onTogglePlayback: _togglePlayback,
           onSkipNext: _playNextInEntry,
@@ -811,6 +1072,11 @@ class _HomeShellState extends State<HomeShell> {
           shuffleEnabledListenable: _shuffleEnabledListenable,
           repeatModeListenable: _repeatModeListenable,
           onShowTrackDetails: _showTrackDetailsFromEntry,
+          likedTrackIdsListenable: _likedIdsListenable,
+          onToggleLike: _toggleLike,
+          sleepTimerListenable: _sleepTimerListenable,
+          onSetSleepTimer: _setSleepTimer,
+          onSleepAtEndOfTrack: _setSleepAtEndOfTrack,
         ),
       ),
     );
@@ -850,6 +1116,8 @@ class _HomeShellState extends State<HomeShell> {
         recentTracks: _allRecentTrackShortcuts(),
         onOpenCollection: _openDetail,
         onPlayTrack: _playTrackFromEntry,
+        onPlayNext: _playTrackNext,
+        onAddToQueue: _addTrackToQueue,
       ),
     );
   }
@@ -943,6 +1211,27 @@ class _HomeShellState extends State<HomeShell> {
     }
   }
 
+  Future<void> _stopAndClearCurrentTrack() async {
+    try {
+      await _audioPlayer.stop();
+    } catch (error, stackTrace) {
+      _logError('stopAndClearCurrentTrack', error, stackTrace);
+    }
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _currentTrack = null;
+      _currentEntryId = null;
+      _currentTrackListenable.value = null;
+      _isPlaying = false;
+    });
+    _queueListenable.value = PlayQueueView.empty;
+    _resetPlaybackProgress();
+    _pendingTrackIdListenable.value = null;
+    _saveSessionNow();
+  }
+
   Future<void> _deleteTrackFromEntry(String entryId, Track track) async {
     final entry = _entryById(entryId);
     if (entry == null) {
@@ -959,19 +1248,7 @@ class _HomeShellState extends State<HomeShell> {
     }
 
     if (_currentTrack?.id == track.id) {
-      try {
-        await _audioPlayer.stop();
-      } catch (error, stackTrace) {
-        _logError('deleteTrackFromEntry.stop', error, stackTrace);
-      }
-      setState(() {
-        _currentTrack = null;
-        _currentEntryId = null;
-        _currentTrackListenable.value = null;
-        _isPlaying = false;
-      });
-      _resetPlaybackProgress();
-      _pendingTrackIdListenable.value = null;
+      await _stopAndClearCurrentTrack();
     }
 
     _releaseTrackResources(track);
@@ -980,6 +1257,8 @@ class _HomeShellState extends State<HomeShell> {
       tracks: entry.tracks.where((t) => t.id != track.id).toList(),
     );
     _replaceEntry(updated);
+    _pruneQueueOfDeletedTracks();
+    _forgetLyricsOfDeletedTracks([track]);
     unawaited(_deleteManagedAudioIfUnused(track.filePath));
     _showMessage('Song deleted.');
   }
@@ -996,19 +1275,7 @@ class _HomeShellState extends State<HomeShell> {
 
     final removedTracks = entry.tracks;
     if (removedTracks.any((t) => t.id == _currentTrack?.id)) {
-      try {
-        await _audioPlayer.stop();
-      } catch (error, stackTrace) {
-        _logError('deleteCollection.stop', error, stackTrace);
-      }
-      setState(() {
-        _currentTrack = null;
-        _currentEntryId = null;
-        _currentTrackListenable.value = null;
-        _isPlaying = false;
-      });
-      _resetPlaybackProgress();
-      _pendingTrackIdListenable.value = null;
+      await _stopAndClearCurrentTrack();
     }
 
     for (final t in removedTracks) {
@@ -1018,6 +1285,8 @@ class _HomeShellState extends State<HomeShell> {
     setState(() {
       _entries = _entries.where((e) => e.id != entry.id).toList();
     });
+    _pruneQueueOfDeletedTracks();
+    _forgetLyricsOfDeletedTracks(removedTracks);
     unawaited(_persistLibrary());
     for (final t in removedTracks) {
       unawaited(_deleteManagedAudioIfUnused(t.filePath));
@@ -1153,18 +1422,17 @@ class _HomeShellState extends State<HomeShell> {
     return Uri.tryParse(trimmed);
   }
 
-  Uri? _notificationArtUriForEntry(CollectionEntry? entry) {
-    if (entry == null || kIsWeb) {
+  Uri? _notificationArtUri(Track track, CollectionEntry? entry) {
+    if (kIsWeb) {
       return null;
     }
-    final thumbnailPath = entry.thumbnailPath?.trim();
-    if (thumbnailPath == null || thumbnailPath.isEmpty) {
-      return null;
+    for (final candidate in [track.artworkPath, entry?.thumbnailPath]) {
+      final trimmed = candidate?.trim() ?? '';
+      if (trimmed.isNotEmpty && localFileExistsSync(trimmed)) {
+        return Uri.file(trimmed);
+      }
     }
-    if (!localFileExistsSync(thumbnailPath)) {
-      return null;
-    }
-    return Uri.file(thumbnailPath);
+    return null;
   }
 
   MediaItem _mediaItemForTrack(Track track, {CollectionEntry? entry}) {
@@ -1173,7 +1441,7 @@ class _HomeShellState extends State<HomeShell> {
       title: track.title,
       artist: track.artist,
       album: entry?.title ?? entry?.type.label,
-      artUri: _notificationArtUriForEntry(entry),
+      artUri: _notificationArtUri(track, entry),
     );
   }
 
@@ -1184,15 +1452,6 @@ class _HomeShellState extends State<HomeShell> {
       sourceUri,
       tag: _mediaItemForTrack(track, entry: entry),
     );
-  }
-
-  List<AudioSource> _buildAudioSourcesForQueue(
-    List<Track> queue, {
-    required CollectionEntry entry,
-  }) {
-    return [
-      for (final item in queue) _buildAudioSourceForTrack(item, entry: entry),
-    ];
   }
 
   Future<String?> _persistAudioFile(PlatformFile file) async {
@@ -1256,20 +1515,340 @@ class _HomeShellState extends State<HomeShell> {
       if (filePath == null || filePath.isEmpty) {
         continue;
       }
+      final tags = await _readTagsForStoredFile(filePath);
       final baseName = file.name.isNotEmpty ? file.name : filePath;
-      final title = path
+      final fileTitle = path
           .basenameWithoutExtension(baseName)
-          .replaceAll('_', ' ');
+          .replaceAll('_', ' ')
+          .trim();
+      final trackId = _newId();
+      await _importSidecarLyrics(file, trackId);
       tracks.add(
         Track(
-          id: _newId(),
-          title: title.isEmpty ? 'Untitled Track' : title,
-          artist: artist,
+          id: trackId,
+          title:
+              tags?.title ?? (fileTitle.isEmpty ? 'Untitled Track' : fileTitle),
+          artist: tags?.artist ?? artist,
           filePath: filePath,
+          artworkPath: await _storeTrackArtwork(tags),
         ),
       );
     }
     return tracks;
+  }
+
+  /// The on-disk path behind a stored track path, or null for web and
+  /// non-file URIs (content://, http://, blob:).
+  String? _localPathForStored(String storedPath) {
+    final trimmed = storedPath.trim();
+    if (kIsWeb || trimmed.isEmpty) {
+      return null;
+    }
+    final uri = _audioUriFromPath(trimmed);
+    if (uri != null && uri.scheme != 'file') {
+      return null;
+    }
+    return uri == null ? trimmed : localFilePathFromUri(uri);
+  }
+
+  Future<AudioTags?> _readTagsForStoredFile(String storedPath) async {
+    final localPath = _localPathForStored(storedPath);
+    return localPath == null ? null : readAudioTags(localPath);
+  }
+
+  /// Imported songs are copied under new names, so a `song.lrc` next to the
+  /// original would be lost; keep it with the track instead.
+  Future<void> _importSidecarLyrics(PlatformFile file, String trackId) async {
+    final sourcePath = file.path;
+    final localSource = sourcePath == null
+        ? null
+        : _localPathForStored(sourcePath);
+    if (localSource == null) {
+      return;
+    }
+    final sidecar = await readSidecarLyrics(localSource);
+    if (Lyrics.tryParse(sidecar) != null) {
+      await _lyricsStore.write(trackId, sidecar!);
+    }
+  }
+
+  /// Imported lyrics first, then a `.lrc` beside the file, then lyrics
+  /// embedded in the file's tags.
+  Future<Lyrics?> _loadLyrics(Track track) async {
+    if (_lyricsCache.containsKey(track.id)) {
+      return _lyricsCache[track.id];
+    }
+    var lyrics = Lyrics.tryParse(await _lyricsStore.read(track.id));
+    final localPath = _localPathForStored(track.filePath);
+    if (lyrics == null && localPath != null) {
+      lyrics = Lyrics.tryParse(await readSidecarLyrics(localPath));
+      lyrics ??= Lyrics.tryParse((await readAudioTags(localPath))?.lyrics);
+    }
+    if (lyrics == null && _onlineLyricsListenable.value) {
+      try {
+        lyrics = await _fetchOnlineLyrics(track);
+      } on LrclibUnavailableException {
+        // Don't remember "no lyrics": LRCLIB may be back next time.
+        _showMessage("Couldn't reach LRCLIB. Try again in a moment.");
+        return null;
+      }
+    }
+    _lyricsCache[track.id] = lyrics;
+    return lyrics;
+  }
+
+  /// Looks the song up on LRCLIB and saves what it finds, so it works
+  /// offline from then on.
+  Future<Lyrics?> _fetchOnlineLyrics(Track track) async {
+    final duration = _currentTrack?.id == track.id
+        ? _durationListenable.value
+        : null;
+    final text = await _lrclib.fetch(
+      title: track.title,
+      artist: track.artist,
+      duration: duration,
+    );
+    final lyrics = Lyrics.tryParse(text);
+    if (lyrics != null) {
+      unawaited(_lyricsStore.write(track.id, text!));
+    }
+    return lyrics;
+  }
+
+  /// Asks before turning on online lookups, since song titles and artists
+  /// leave the device. Returns whether online lyrics are now on.
+  Future<bool> _enableOnlineLyrics() async {
+    if (_onlineLyricsListenable.value) {
+      return true;
+    }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Find lyrics online?'),
+        content: const Text(
+          'When a song has no lyrics on this device, II.VI will look it up on '
+          'LRCLIB (lrclib.net), a free, community-run lyrics database.\n\n'
+          'Only the song\'s title, artist and length are sent. Lyrics that are '
+          'found are saved on this device. You can turn this off any time '
+          'from the menu.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Not now'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Turn on'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) {
+      return false;
+    }
+    _setOnlineLyrics(true);
+    return true;
+  }
+
+  void _setOnlineLyrics(bool enabled) {
+    if (_onlineLyricsListenable.value == enabled) {
+      return;
+    }
+    _onlineLyricsListenable.value = enabled;
+    if (enabled) {
+      // Songs that had no lyrics earlier deserve another look.
+      _lyricsCache.removeWhere((_, lyrics) => lyrics == null);
+    }
+    setState(() {});
+    unawaited(_persistPrefs(notifyOnFailure: false));
+    _showMessage(enabled ? 'Online lyrics on.' : 'Online lyrics off.');
+  }
+
+  Future<Lyrics?> _importLyricsFor(Track track) async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: const ['lrc', 'txt'],
+      withData: true,
+    );
+    final bytes = result?.files.firstOrNull?.bytes;
+    if (bytes == null || bytes.isEmpty) {
+      return null;
+    }
+    final text = utf8.decode(bytes, allowMalformed: true);
+    final lyrics = Lyrics.tryParse(text);
+    if (lyrics == null) {
+      _showMessage('That file has no lyrics in it.');
+      return null;
+    }
+    if (!await _lyricsStore.write(track.id, text)) {
+      _showMessage('Could not save these lyrics.');
+      return null;
+    }
+    _lyricsCache[track.id] = lyrics;
+    _showMessage(
+      lyrics.isSynced
+          ? 'Synced lyrics added.'
+          : 'Lyrics added (not time-synced).',
+    );
+    return lyrics;
+  }
+
+  Future<void> _removeLyricsFor(Track track) async {
+    await _lyricsStore.delete(track.id);
+    _lyricsCache.remove(track.id);
+    _showMessage('Imported lyrics removed.');
+  }
+
+  /// Deletes stored lyrics for tracks that no longer exist anywhere.
+  void _forgetLyricsOfDeletedTracks(Iterable<Track> removed) {
+    final alive = tracksById(_entries);
+    for (final track in removed) {
+      if (!alive.containsKey(track.id)) {
+        _lyricsCache.remove(track.id);
+        unawaited(_lyricsStore.delete(track.id));
+      }
+    }
+  }
+
+  Future<void> _openLyrics() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => LyricsPage(
+          currentTrackListenable: _currentTrackListenable,
+          positionStream: _audioPlayer.positionStream,
+          initialPosition: _position,
+          onSeek: _seekTo,
+          loadLyrics: _loadLyrics,
+          onImportLyrics: _importLyricsFor,
+          onRemoveLyrics: _removeLyricsFor,
+          onlineLyricsListenable: _onlineLyricsListenable,
+          onEnableOnlineLyrics: _enableOnlineLyrics,
+        ),
+      ),
+    );
+  }
+
+  /// Saves embedded cover art under a content-derived name, so every track
+  /// from the same album shares one file instead of writing a copy each.
+  Future<String?> _storeTrackArtwork(AudioTags? tags) async {
+    if (kIsWeb || tags == null || !tags.hasCover) {
+      return null;
+    }
+    final bytes = tags.coverBytes!;
+    try {
+      final artworkDir = await ensureAppSubdirectory('track_artwork');
+      if (artworkDir == null) {
+        return null;
+      }
+      final hash = Object.hashAll(bytes).toUnsigned(32).toRadixString(16);
+      final fileName = 'art_${bytes.length}_$hash${tags.coverExtension}';
+      return await writeLocalFileBytesIfAbsent(
+        targetPath: path.join(artworkDir, fileName),
+        bytes: bytes,
+      );
+    } catch (error, stackTrace) {
+      _logError('storeTrackArtwork', error, stackTrace);
+      return null;
+    }
+  }
+
+  bool _isRescanning = false;
+
+  /// Re-reads tags for every stored song so tracks imported before tag
+  /// support get proper titles, artists and cover art.
+  Future<void> _rescanSongInfo() async {
+    if (_isRescanning) {
+      return;
+    }
+    _isRescanning = true;
+    _showMessage('Scanning your songs…');
+    try {
+      final updates = <String, Track>{};
+      for (final track in tracksById(_entries).values) {
+        if (track.filePath.trim().isEmpty) {
+          continue;
+        }
+        final tags = await _readTagsForStoredFile(track.filePath);
+        if (tags == null) {
+          continue;
+        }
+        final updated = track.copyWith(
+          title: tags.title,
+          artist: tags.artist,
+          artworkPath: await _storeTrackArtwork(tags),
+        );
+        if (!updated.hasSameInfoAs(track)) {
+          updates[track.id] = updated;
+        }
+      }
+      if (!mounted) {
+        return;
+      }
+      if (updates.isEmpty) {
+        _showMessage('All song info is already up to date.');
+        return;
+      }
+
+      // Apply to the library as it is now, not as it was when the scan
+      // started, so edits made during the scan are kept.
+      final merged = [
+        for (final entry in _entries)
+          if (!entry.tracks.any((track) => updates.containsKey(track.id)))
+            entry
+          else
+            _withFallbackThumbnail(
+              entry.copyWith(
+                tracks: [
+                  for (final track in entry.tracks) updates[track.id] ?? track,
+                ],
+              ),
+              entry.tracks.map((track) => updates[track.id] ?? track).toList(),
+            ),
+      ];
+      final current = _currentTrack;
+      final updatedCurrent = current == null ? null : updates[current.id];
+      setState(() {
+        _entries = merged;
+        if (updatedCurrent != null) {
+          _currentTrack = updatedCurrent;
+          _currentTrackListenable.value = updatedCurrent;
+        }
+      });
+      final view = _queueListenable.value;
+      _queueListenable.value = view.copyWith(
+        items: [
+          for (final item in view.items)
+            updates[item.track.id] == null
+                ? item
+                : item.withTrack(updates[item.track.id]!),
+        ],
+      );
+      unawaited(_persistLibrary());
+      _showMessage('Updated info for ${updates.length} song(s).');
+    } finally {
+      _isRescanning = false;
+    }
+  }
+
+  /// Uses the first imported track's cover when the collection has none.
+  CollectionEntry _withFallbackThumbnail(
+    CollectionEntry entry,
+    List<Track> tracks,
+  ) {
+    final hasThumbnail =
+        (entry.thumbnailPath?.isNotEmpty ?? false) ||
+        (entry.thumbnailDataBase64?.isNotEmpty ?? false);
+    if (hasThumbnail) {
+      return entry;
+    }
+    for (final track in tracks) {
+      final artwork = track.artworkPath;
+      if (artwork != null && artwork.isNotEmpty) {
+        return entry.withThumbnail(thumbnailPath: artwork);
+      }
+    }
+    return entry;
   }
 
   void _replaceEntry(CollectionEntry updated) {
@@ -1278,9 +1857,8 @@ class _HomeShellState extends State<HomeShell> {
           .map((entry) => entry.id == updated.id ? updated : entry)
           .toList();
     });
-    if (_currentEntryId == updated.id) {
-      _refreshQueueForEntry(updated);
-      unawaited(_rebuildCurrentAudioSourcePreservingTrack());
+    if (_queueListenable.value.contextEntryId == updated.id) {
+      unawaited(_rebuildQueueFromContext());
     }
     unawaited(_persistLibrary());
   }
@@ -1319,115 +1897,290 @@ class _HomeShellState extends State<HomeShell> {
     return queue;
   }
 
-  void _refreshQueueForEntry(CollectionEntry entry) {
-    _queueListenable.value = _queueForEntry(entry);
-  }
-
-  void _refreshQueueForCurrentEntry() {
-    final entryId = _currentEntryId;
-    if (entryId == null) {
-      _queueListenable.value = const [];
-      return;
-    }
-    final entry = _entryById(entryId);
-    if (entry == null) {
-      _queueListenable.value = const [];
-      return;
-    }
-    _refreshQueueForEntry(entry);
-  }
-
   void _syncCurrentTrackFromQueueIndex(int? index) {
     if (!mounted || index == null || index < 0) {
       return;
     }
-    final queue = _queueListenable.value;
-    if (index >= queue.length) {
+    final view = _queueListenable.value;
+    if (index >= view.items.length) {
       return;
     }
-
-    final nextTrack = queue[index];
-    if (_currentTrack?.id == nextTrack.id) {
-      return;
+    if (view.currentIndex != index) {
+      _queueListenable.value = view.copyWith(currentIndex: index);
+      // Like Spotify, a queued song leaves the queue once playback moves past
+      // it, so repeat-all doesn't play it again.
+      final played = {
+        for (var i = 0; i < index; i++)
+          if (view.items[i].userQueued) view.items[i].uid,
+      };
+      if (played.isNotEmpty) {
+        unawaited(_removeFromQueueWhere((item) => played.contains(item.uid)));
+      }
     }
 
+    final item = view.items[index];
+    if (_currentTrack?.id == item.track.id && _currentEntryId == item.entryId) {
+      return;
+    }
     setState(() {
-      _currentTrack = nextTrack;
-      _currentTrackListenable.value = nextTrack;
+      _currentEntryId = item.entryId;
+      _currentTrack = item.track;
+      _currentTrackListenable.value = item.track;
     });
     _pendingTrackIdListenable.value = null;
-    final entryId = _currentEntryId;
-    if (entryId != null) {
-      _rememberRecentlyPlayed(entryId: entryId, trackId: nextTrack.id);
-    }
+    _rememberRecentlyPlayed(entryId: item.entryId, trackId: item.track.id);
   }
 
-  Future<void> _rebuildCurrentAudioSourcePreservingTrack() async {
-    final entryId = _currentEntryId;
-    final current = _currentTrack;
-    if (entryId == null || current == null) {
-      return;
-    }
-    final entry = _entryById(entryId);
-    if (entry == null || entry.tracks.isEmpty) {
-      return;
-    }
+  Future<T> _runQueueOp<T>(Future<T> Function() op) {
+    final result = _queueOpChain.then((_) => op());
+    _queueOpChain = result.then((_) {}, onError: (Object _) {});
+    return result;
+  }
 
-    final queue = _queueForEntry(entry);
-    if (queue.isEmpty) {
-      return;
-    }
-    _queueListenable.value = queue;
-    final targetIndex = queue.indexWhere((track) => track.id == current.id);
-    if (targetIndex < 0) {
-      return;
-    }
+  /// Replaces the whole playlist. [compose] receives the queue as it is when
+  /// the operation runs, not when it was requested.
+  Future<void> _loadQueue(
+    PlayQueueView Function(PlayQueueView current) compose, {
+    Duration position = Duration.zero,
+    required bool autoplay,
+  }) {
+    return _runQueueOp(() async {
+      final view = compose(_queueListenable.value);
+      if (view.current == null) {
+        return;
+      }
+      _queueListenable.value = view;
+      await _audioPlayer.setAudioSources(
+        [
+          for (final item in view.items)
+            _buildAudioSourceForTrack(
+              item.track,
+              entry: _entryById(item.entryId),
+            ),
+        ],
+        initialIndex: view.currentIndex,
+        initialPosition: position,
+      );
+      await _applyPlayerLoopMode();
+      if (autoplay) {
+        await _audioSession?.setActive(true);
+        await _audioPlayer.play();
+      }
+    });
+  }
 
-    final sources = _buildAudioSourcesForQueue(queue, entry: entry);
+  /// Re-reads the collection being played (after shuffle is toggled or its
+  /// songs change) while keeping the current song and the user's queue.
+  Future<void> _rebuildQueueFromContext() async {
+    final contextId = _queueListenable.value.contextEntryId;
+    if (contextId == null || _queueListenable.value.current == null) {
+      return;
+    }
     final resumePosition = _position;
     final resumePlayback = _isPlaying;
     try {
-      await _audioPlayer.setAudioSources(
-        sources,
-        initialIndex: targetIndex,
-        initialPosition: resumePosition,
+      await _loadQueue(
+        (current) {
+          final contextEntry = _entryById(contextId);
+          return recomposeQueue(
+            current,
+            context: contextEntry == null
+                ? const []
+                : _queueForEntry(contextEntry),
+            contextEntryId: contextId,
+          );
+        },
+        position: resumePosition,
+        autoplay: resumePlayback,
       );
-      await _applyPlayerLoopMode();
-      if (resumePlayback) {
+    } catch (error, stackTrace) {
+      _logError('rebuildQueueFromContext', error, stackTrace);
+    }
+  }
+
+  /// "Play next" / "Add to queue". Starts playback if nothing is loaded.
+  Future<void> _enqueueTrack(
+    Track track,
+    CollectionEntry entry, {
+    required bool playNext,
+  }) async {
+    if (_queueListenable.value.current == null) {
+      await _playTrack(track, entryId: entry.id);
+      return;
+    }
+    if (!_isTrackFileAvailable(track)) {
+      _showMessage('Track file not found. Upload a local file for this song.');
+      return;
+    }
+    final item = QueueItem(track: track, entryId: entry.id, userQueued: true);
+    try {
+      await _runQueueOp(() async {
+        final view = _queueListenable.value;
+        final index = playNext
+            ? playNextInsertIndex(view)
+            : addToQueueInsertIndex(view);
+        // Update the mirror first so index events from the player resolve
+        // against the new layout.
+        _queueListenable.value = view.copyWith(
+          items: [...view.items]..insert(index, item),
+        );
+        try {
+          await _audioPlayer.insertAudioSource(
+            index,
+            _buildAudioSourceForTrack(track, entry: entry),
+          );
+        } catch (_) {
+          final latest = _queueListenable.value;
+          _queueListenable.value = latest.copyWith(
+            items: [
+              for (final other in latest.items)
+                if (other.uid != item.uid) other,
+            ],
+          );
+          rethrow;
+        }
+      });
+      _saveSessionNow();
+      _showMessage(
+        playNext
+            ? 'Playing next: ${track.title}'
+            : 'Added to queue: ${track.title}',
+      );
+    } catch (error, stackTrace) {
+      _logError('enqueueTrack', error, stackTrace);
+      _showMessage('Could not add this song to the queue.');
+    }
+  }
+
+  Future<void> _playTrackNext(Track track, CollectionEntry entry) =>
+      _enqueueTrack(track, entry, playNext: true);
+
+  Future<void> _addTrackToQueue(Track track, CollectionEntry entry) =>
+      _enqueueTrack(track, entry, playNext: false);
+
+  /// Removes items other than the one playing that match [test].
+  Future<void> _removeFromQueueWhere(bool Function(QueueItem item) test) {
+    return _runQueueOp(() async {
+      final view = _queueListenable.value;
+      final doomed = [
+        for (var i = view.items.length - 1; i >= 0; i--)
+          if (i != view.currentIndex && test(view.items[i])) i,
+      ];
+      if (doomed.isEmpty) {
+        return;
+      }
+      final items = [...view.items];
+      var currentIndex = view.currentIndex;
+      for (final index in doomed) {
+        items.removeAt(index);
+        if (index < currentIndex) {
+          currentIndex--;
+        }
+      }
+      _queueListenable.value = view.copyWith(
+        items: items,
+        currentIndex: currentIndex,
+      );
+      try {
+        for (final index in doomed) {
+          await _audioPlayer.removeAudioSourceAt(index);
+        }
+      } catch (error, stackTrace) {
+        _logError('removeFromQueue', error, stackTrace);
+      }
+    });
+  }
+
+  void _removeQueueItem(String uid) {
+    unawaited(
+      _removeFromQueueWhere(
+        (item) => item.uid == uid,
+      ).then((_) => _saveSessionNow()),
+    );
+  }
+
+  /// Drag-to-reorder in Now Playing. [offset] is the target position among
+  /// the upcoming songs (0 = straight after the current song).
+  void _moveQueueItem(String uid, int offset) {
+    unawaited(
+      _runQueueOp(() async {
+        final view = _queueListenable.value;
+        final from = view.indexOfUid(uid);
+        final to = view.currentIndex + 1 + offset;
+        final next = moveQueueItem(view, from, to);
+        if (identical(next, view)) {
+          return;
+        }
+        _queueListenable.value = next;
+        if (from == to) {
+          return;
+        }
+        try {
+          await _audioPlayer.moveAudioSource(from, to);
+        } catch (error, stackTrace) {
+          _logError('moveQueueItem', error, stackTrace);
+        }
+      }).then((_) => _saveSessionNow()),
+    );
+  }
+
+  /// Drops queued copies of songs that no longer exist in the library.
+  void _pruneQueueOfDeletedTracks() {
+    // Resolved when the operation runs, after any queued rebuild.
+    Set<String>? alive;
+    unawaited(
+      _removeFromQueueWhere(
+        (item) => !(alive ??= tracksById(
+          _entries,
+        ).keys.toSet()).contains(item.track.id),
+      ),
+    );
+  }
+
+  Future<void> _jumpToQueueItem(String uid) async {
+    final index = _queueListenable.value.indexOfUid(uid);
+    if (index < 0) {
+      return;
+    }
+    try {
+      await _audioPlayer.seek(Duration.zero, index: index);
+      if (!_isPlaying) {
         await _audioSession?.setActive(true);
         await _audioPlayer.play();
       }
     } catch (error, stackTrace) {
-      _logError('rebuildCurrentAudioSource', error, stackTrace);
+      _logError('jumpToQueueItem', error, stackTrace);
     }
   }
 
-  Future<void> _playTrack(Track track, {String? entryId}) async {
+  bool _isTrackFileAvailable(Track track) {
     final rawPath = track.filePath.trim();
     if (rawPath.isEmpty) {
+      return false;
+    }
+    if (kIsWeb) {
+      return true;
+    }
+    final uri = _audioUriFromPath(rawPath);
+    if (uri == null) {
+      return localFileExistsSync(rawPath);
+    }
+    if (uri.scheme == 'file') {
+      return localFileUriExistsSync(uri);
+    }
+    return true;
+  }
+
+  Future<void> _playTrack(Track track, {String? entryId}) async {
+    if (!_isTrackFileAvailable(track)) {
       _showMessage('Track file not found. Upload a local file for this song.');
       return;
     }
 
-    final uri = _audioUriFromPath(rawPath);
-    if (!kIsWeb) {
-      if (uri == null && !localFileExistsSync(rawPath)) {
-        _showMessage(
-          'Track file not found. Upload a local file for this song.',
-        );
-        return;
-      }
-      if (uri?.scheme == 'file' && !localFileUriExistsSync(uri!)) {
-        _showMessage(
-          'Track file not found. Upload a local file for this song.',
-        );
-        return;
-      }
-    }
-
-    final nextEntryId = entryId ?? _currentEntryId;
+    final nextEntryId = entryId ?? _currentEntryId ?? '';
     try {
-      if (_currentTrack?.id == track.id && _currentEntryId == nextEntryId) {
+      if (_currentTrack?.id == track.id &&
+          _queueListenable.value.contextEntryId == nextEntryId) {
         if (!_isPlaying) {
           await _audioSession?.setActive(true);
           await _audioPlayer.play();
@@ -1443,35 +2196,20 @@ class _HomeShellState extends State<HomeShell> {
       });
       _resetPlaybackProgress();
       _pendingTrackIdListenable.value = track.id;
-      final entry = nextEntryId == null ? null : _entryById(nextEntryId);
-      await _audioSession?.setActive(true);
-      if (entry != null && entry.tracks.isNotEmpty) {
-        final queue = _queueForEntry(entry);
-        final effectiveQueue = queue.isEmpty ? [track] : queue;
-        _queueListenable.value = effectiveQueue;
-        final currentIndex = effectiveQueue.indexWhere(
-          (item) => item.id == track.id,
-        );
-        final sources = _buildAudioSourcesForQueue(
-          effectiveQueue,
-          entry: entry,
-        );
-        await _audioPlayer.setAudioSources(
-          sources,
-          initialIndex: currentIndex < 0 ? 0 : currentIndex,
-          initialPosition: Duration.zero,
-        );
-      } else {
-        _queueListenable.value = [track];
-        await _audioPlayer.setAudioSource(
-          _buildAudioSourceForTrack(track, entry: entry),
-        );
-      }
-      await _applyPlayerLoopMode();
-      await _audioPlayer.play();
-      if (nextEntryId != null) {
-        _rememberRecentlyPlayed(entryId: nextEntryId, trackId: track.id);
-      }
+      final entry = _entryById(nextEntryId);
+      final context = entry == null || entry.tracks.isEmpty
+          ? [track]
+          : _queueForEntry(entry);
+      await _loadQueue(
+        (previous) => startQueue(
+          previous,
+          startTrack: track,
+          context: context,
+          contextEntryId: nextEntryId,
+        ),
+        autoplay: true,
+      );
+      _rememberRecentlyPlayed(entryId: nextEntryId, trackId: track.id);
       if (!mounted) {
         return;
       }
@@ -1505,13 +2243,12 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   Future<void> _playNextInEntry() async {
-    final queue = _queueListenable.value;
+    final queue = _queueListenable.value.items;
     if (queue.isEmpty) {
       return;
     }
     final currentIndex =
-        _audioPlayer.currentIndex ??
-        queue.indexWhere((track) => track.id == _currentTrack?.id);
+        _audioPlayer.currentIndex ?? _queueListenable.value.currentIndex;
     if (currentIndex < 0) {
       return;
     }
@@ -1519,13 +2256,13 @@ class _HomeShellState extends State<HomeShell> {
       await _audioPlayer.seek(Duration.zero, index: currentIndex + 1);
       return;
     }
-    if (_repeatMode == RepeatMode.all) {
+    if (_repeatMode == PlaybackRepeatMode.all) {
       await _audioPlayer.seek(Duration.zero, index: 0);
     }
   }
 
   Future<void> _playPreviousInEntry() async {
-    final queue = _queueListenable.value;
+    final queue = _queueListenable.value.items;
     if (queue.isEmpty) {
       return;
     }
@@ -1534,8 +2271,7 @@ class _HomeShellState extends State<HomeShell> {
       return;
     }
     final currentIndex =
-        _audioPlayer.currentIndex ??
-        queue.indexWhere((track) => track.id == _currentTrack?.id);
+        _audioPlayer.currentIndex ?? _queueListenable.value.currentIndex;
     if (currentIndex < 0) {
       return;
     }
@@ -1543,7 +2279,7 @@ class _HomeShellState extends State<HomeShell> {
       await _audioPlayer.seek(Duration.zero, index: currentIndex - 1);
       return;
     }
-    if (_repeatMode == RepeatMode.all) {
+    if (_repeatMode == PlaybackRepeatMode.all) {
       await _audioPlayer.seek(Duration.zero, index: queue.length - 1);
       return;
     }
@@ -1594,13 +2330,16 @@ class _HomeShellState extends State<HomeShell> {
       return null;
     }
 
+    final storedThumbPath = thumbData == null
+        ? await _persistThumbnailPath(thumbPath)
+        : null;
     final current = _entryById(entryId);
     if (current == null) {
       return null;
     }
 
-    final updated = current.copyWith(
-      thumbnailPath: thumbPath,
+    final updated = current.withThumbnail(
+      thumbnailPath: storedThumbPath,
       thumbnailDataBase64: thumbData,
     );
     _replaceEntry(updated);
@@ -1625,7 +2364,10 @@ class _HomeShellState extends State<HomeShell> {
       return null;
     }
 
-    final updated = current.copyWith(tracks: [...current.tracks, ...tracks]);
+    final updated = _withFallbackThumbnail(
+      current.copyWith(tracks: [...current.tracks, ...tracks]),
+      tracks,
+    );
     _replaceEntry(updated);
     _showMessage('${tracks.length} song(s) added to ${updated.title}.');
     return updated;
@@ -1787,6 +2529,9 @@ class _HomeShellState extends State<HomeShell> {
       draft.selectedSongs,
       artist: 'J. Cole',
     );
+    final thumbnailPath = draft.thumbnailDataBase64 == null
+        ? await _persistThumbnailPath(draft.thumbnailPath)
+        : null;
     if (!mounted) {
       return;
     }
@@ -1796,15 +2541,18 @@ class _HomeShellState extends State<HomeShell> {
         : const <Track>[];
     final effectiveTracks = [...fromSingles, ...tracks];
 
-    final created = CollectionEntry(
-      id: _newId(),
-      type: type,
-      title: draft.title,
-      history: draft.history,
-      featuredArtists: draft.featuredArtists,
-      tracks: effectiveTracks,
-      thumbnailPath: draft.thumbnailPath,
-      thumbnailDataBase64: draft.thumbnailDataBase64,
+    final created = _withFallbackThumbnail(
+      CollectionEntry(
+        id: _newId(),
+        type: type,
+        title: draft.title,
+        history: draft.history,
+        featuredArtists: draft.featuredArtists,
+        tracks: effectiveTracks,
+        thumbnailPath: thumbnailPath,
+        thumbnailDataBase64: draft.thumbnailDataBase64,
+      ),
+      effectiveTracks,
     );
 
     setState(() {
@@ -1833,12 +2581,16 @@ class _HomeShellState extends State<HomeShell> {
           onOpenNowPlaying: _openNowPlaying,
           onOpenQueuedNowPlaying: _openQueuedNowPlaying,
           queueListenable: _queueListenable,
-          currentEntryId: _currentEntryId,
+          onJumpToQueueItem: _jumpToQueueItem,
+          onPlayNext: _playTrackNext,
+          onAddToQueue: _addTrackToQueue,
           onShowTrackDetails: _showTrackDetailsFromEntry,
           onReorderTracks: _reorderEntryTracks,
           onDeleteTrack: _deleteTrackFromEntry,
-          onMenuAction: _runMenuActionFromDetail,
+          onMenuAction: _runMenuAction,
           resolveEntry: _entryById,
+          likedTrackIdsListenable: _likedIdsListenable,
+          onToggleLike: _toggleLike,
         ),
       ),
     );
@@ -1846,26 +2598,6 @@ class _HomeShellState extends State<HomeShell> {
       return;
     }
     setState(() {});
-  }
-
-  Future<void> _runMenuActionFromDetail(
-    CollectionEntry entry,
-    EntryMenuAction action,
-  ) async {
-    switch (action) {
-      case EntryMenuAction.open:
-        await _openDetail(entry);
-        break;
-      case EntryMenuAction.editThumbnail:
-        await _pickAndSetThumbnail(entry.id);
-        break;
-      case EntryMenuAction.uploadSongs:
-        await _uploadSongsToEntry(entry.id);
-        break;
-      case EntryMenuAction.deleteCollection:
-        await _deleteCollection(entry);
-        break;
-    }
   }
 
   Future<void> _runMenuAction(
@@ -1900,6 +2632,24 @@ class _HomeShellState extends State<HomeShell> {
     });
   }
 
+  Widget _buildLibraryPage(CollectionType type, String keyName) {
+    return LibraryPage(
+      key: ValueKey(keyName),
+      tabType: type,
+      entries: _ofType(type),
+      recentTracks: _recentTracksForType(type),
+      onOpen: _openDetail,
+      onPlayRecentTrack: _playTrackFromEntry,
+      onPlayNext: _playTrackNext,
+      onAddToQueue: _addTrackToQueue,
+      onCreateCollection: () => _createCollection(type),
+      onUploadToCollection: () => _uploadSongsToTypeCollection(type),
+      onPlayAll: () => _playFromType(type, shuffle: false),
+      onShufflePlay: () => _playFromType(type, shuffle: true),
+      onMenuAction: _runMenuAction,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final tabs = _visibleTabs();
@@ -1907,64 +2657,15 @@ class _HomeShellState extends State<HomeShell> {
     final effectiveIndex = _tabIndex.clamp(0, maxIndex);
     final currentTab = tabs[effectiveIndex];
     final page = switch (currentTab) {
-      _HomeTab.albums => LibraryPage(
-        key: const ValueKey('albums'),
-        tabType: CollectionType.album,
-        entries: _ofType(CollectionType.album),
-        recentTracks: _recentTracksForType(CollectionType.album),
-        onOpen: _openDetail,
-        onPlayRecentTrack: _playTrackFromEntry,
-        onCreateCollection: () => _createCollection(CollectionType.album),
-        onUploadToCollection: () =>
-            _uploadSongsToTypeCollection(CollectionType.album),
-        onPlayAll: () => _playFromType(CollectionType.album, shuffle: false),
-        onShufflePlay: () => _playFromType(CollectionType.album, shuffle: true),
-        onMenuAction: _runMenuAction,
+      _HomeTab.albums => _buildLibraryPage(CollectionType.album, 'albums'),
+      _HomeTab.singles => _buildLibraryPage(CollectionType.single, 'singles'),
+      _HomeTab.features => _buildLibraryPage(
+        CollectionType.feature,
+        'features',
       ),
-      _HomeTab.singles => LibraryPage(
-        key: const ValueKey('singles'),
-        tabType: CollectionType.single,
-        entries: _ofType(CollectionType.single),
-        recentTracks: _recentTracksForType(CollectionType.single),
-        onOpen: _openDetail,
-        onPlayRecentTrack: _playTrackFromEntry,
-        onCreateCollection: () => _createCollection(CollectionType.single),
-        onUploadToCollection: () =>
-            _uploadSongsToTypeCollection(CollectionType.single),
-        onPlayAll: () => _playFromType(CollectionType.single, shuffle: false),
-        onShufflePlay: () =>
-            _playFromType(CollectionType.single, shuffle: true),
-        onMenuAction: _runMenuAction,
-      ),
-      _HomeTab.features => LibraryPage(
-        key: const ValueKey('features'),
-        tabType: CollectionType.feature,
-        entries: _ofType(CollectionType.feature),
-        recentTracks: _recentTracksForType(CollectionType.feature),
-        onOpen: _openDetail,
-        onPlayRecentTrack: _playTrackFromEntry,
-        onCreateCollection: () => _createCollection(CollectionType.feature),
-        onUploadToCollection: () =>
-            _uploadSongsToTypeCollection(CollectionType.feature),
-        onPlayAll: () => _playFromType(CollectionType.feature, shuffle: false),
-        onShufflePlay: () =>
-            _playFromType(CollectionType.feature, shuffle: true),
-        onMenuAction: _runMenuAction,
-      ),
-      _HomeTab.playlist => LibraryPage(
-        key: const ValueKey('playlists'),
-        tabType: CollectionType.playlist,
-        entries: _ofType(CollectionType.playlist),
-        recentTracks: _recentTracksForType(CollectionType.playlist),
-        onOpen: _openDetail,
-        onPlayRecentTrack: _playTrackFromEntry,
-        onCreateCollection: () => _createCollection(CollectionType.playlist),
-        onUploadToCollection: () =>
-            _uploadSongsToTypeCollection(CollectionType.playlist),
-        onPlayAll: () => _playFromType(CollectionType.playlist, shuffle: false),
-        onShufflePlay: () =>
-            _playFromType(CollectionType.playlist, shuffle: true),
-        onMenuAction: _runMenuAction,
+      _HomeTab.playlist => _buildLibraryPage(
+        CollectionType.playlist,
+        'playlists',
       ),
       _HomeTab.story => ArtistHistoryPage(
         key: const ValueKey('story'),
@@ -2059,6 +2760,16 @@ class _HomeShellState extends State<HomeShell> {
                 case 'restore_launch':
                   await _restoreLaunchTab();
                   break;
+                case 'rescan_songs':
+                  await _rescanSongInfo();
+                  break;
+                case 'online_lyrics':
+                  if (_onlineLyricsListenable.value) {
+                    _setOnlineLyrics(false);
+                  } else {
+                    await _enableOnlineLyrics();
+                  }
+                  break;
               }
             },
             itemBuilder: (context) => [
@@ -2098,6 +2809,16 @@ class _HomeShellState extends State<HomeShell> {
                   child: Text('Edit Story Content'),
                 ),
               const PopupMenuDivider(),
+              if (!kIsWeb)
+                const PopupMenuItem(
+                  value: 'rescan_songs',
+                  child: Text('Rescan Song Info'),
+                ),
+              CheckedPopupMenuItem(
+                value: 'online_lyrics',
+                checked: _onlineLyricsListenable.value,
+                child: const Text('Find Lyrics Online'),
+              ),
               if (_showStoryTab)
                 const PopupMenuItem(
                   value: 'remove_story',
@@ -2180,6 +2901,8 @@ class _HomeShellState extends State<HomeShell> {
                       onToggleShuffle: () =>
                           _setShuffleEnabled(!_shuffleEnabled),
                       shuffleEnabled: _shuffleEnabled,
+                      isLiked: _isLiked(_currentTrack!),
+                      onToggleLike: () => _toggleLike(_currentTrack!),
                     ),
             ),
             FloatingNavBar(
@@ -2247,6 +2970,47 @@ class _RecentPlayPointer {
   }
 }
 
+class _LastSession {
+  const _LastSession({
+    required this.entryId,
+    required this.trackId,
+    required this.position,
+  });
+
+  final String entryId;
+  final String trackId;
+  final Duration position;
+
+  Map<String, dynamic> toJson() {
+    return {
+      'entryId': entryId,
+      'trackId': trackId,
+      'positionMs': position.inMilliseconds,
+    };
+  }
+
+  static _LastSession? fromJson(Object? raw) {
+    if (raw is! Map) {
+      return null;
+    }
+    final entryId = (raw['entryId'] ?? '').toString().trim();
+    final trackId = (raw['trackId'] ?? '').toString().trim();
+    if (entryId.isEmpty || trackId.isEmpty) {
+      return null;
+    }
+    final positionMs = raw['positionMs'];
+    return _LastSession(
+      entryId: entryId,
+      trackId: trackId,
+      position: Duration(
+        milliseconds: positionMs is num && positionMs > 0
+            ? positionMs.toInt()
+            : 0,
+      ),
+    );
+  }
+}
+
 class _TrackSearchHit {
   const _TrackSearchHit({required this.entry, required this.track});
 
@@ -2260,12 +3024,23 @@ class _LibrarySearchDelegate extends SearchDelegate<void> {
     required this.recentTracks,
     required this.onOpenCollection,
     required this.onPlayTrack,
+    required this.onPlayNext,
+    required this.onAddToQueue,
   });
 
   final List<CollectionEntry> entries;
   final List<RecentTrackShortcut> recentTracks;
   final Future<void> Function(CollectionEntry entry) onOpenCollection;
   final Future<void> Function(Track track, CollectionEntry entry) onPlayTrack;
+  final Future<void> Function(Track track, CollectionEntry entry) onPlayNext;
+  final Future<void> Function(Track track, CollectionEntry entry) onAddToQueue;
+
+  Widget _queueMenu(Track track, CollectionEntry entry) {
+    return TrackQueueMenuButton(
+      onPlayNext: () => onPlayNext(track, entry),
+      onAddToQueue: () => onAddToQueue(track, entry),
+    );
+  }
 
   @override
   String get searchFieldLabel => 'Search songs, artists, collections';
@@ -2396,7 +3171,7 @@ class _LibrarySearchDelegate extends SearchDelegate<void> {
               leading: const Icon(Icons.history),
               title: Text(item.track.title),
               subtitle: Text('${item.entry.title} • ${item.entry.type.label}'),
-              trailing: const Icon(Icons.play_arrow),
+              trailing: _queueMenu(item.track, item.entry),
               onTap: () => _playTrackResult(context, item.track, item.entry),
             ),
         ],
@@ -2408,7 +3183,7 @@ class _LibrarySearchDelegate extends SearchDelegate<void> {
               leading: const Icon(Icons.music_note),
               title: Text(hit.track.title),
               subtitle: Text('${hit.track.artist} • ${hit.entry.title}'),
-              trailing: const Icon(Icons.play_arrow),
+              trailing: _queueMenu(hit.track, hit.entry),
               onTap: () => _playTrackResult(context, hit.track, hit.entry),
             ),
           const SizedBox(height: 8),
@@ -3246,9 +4021,14 @@ class _StoryEditorDialogState extends State<_StoryEditorDialog> {
 
   void _resetDefaults() {
     final defaults = StoryContent.defaults();
-    for (final draft in _sectionDrafts) {
-      draft.dispose();
-    }
+    // The old controllers are still attached to TextFields until the next
+    // frame rebuilds with the new drafts, so dispose them after that frame.
+    final staleDrafts = _sectionDrafts;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      for (final draft in staleDrafts) {
+        draft.dispose();
+      }
+    });
     setState(() {
       _heroTitleController.text = defaults.heroTitle;
       _heroSummaryController.text = defaults.heroSummary;

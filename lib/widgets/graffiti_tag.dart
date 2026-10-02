@@ -19,8 +19,7 @@ class GraffitiTag extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final resolvedBorder = borderColor ?? Colors.white24;
-    final resolvedText =
-        textColor ?? Theme.of(context).colorScheme.onSurface;
+    final resolvedText = textColor ?? Theme.of(context).colorScheme.onSurface;
     final decoration = fillColor == null
         ? const BoxDecoration(
             gradient: LinearGradient(
@@ -55,9 +54,9 @@ class GraffitiTag extends StatelessWidget {
       child: Text(
         label.toUpperCase(),
         style: Theme.of(context).textTheme.labelLarge?.copyWith(
-              color: resolvedText,
-              letterSpacing: 1.2,
-            ),
+          color: resolvedText,
+          letterSpacing: 1.2,
+        ),
       ),
     );
   }

@@ -24,10 +24,7 @@ extension type _JSBlobPropertyBag(JSObject _) implements JSObject {
   external factory _JSBlobPropertyBag.new_({String? type});
 }
 
-String? createObjectUrlFromBytes(
-  List<int> bytes, {
-  String? mimeType,
-}) {
+String? createObjectUrlFromBytes(List<int> bytes, {String? mimeType}) {
   if (bytes.isEmpty) {
     return null;
   }

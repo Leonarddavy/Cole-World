@@ -33,3 +33,14 @@ Future<List<String>> listAudioFilesRecursively(
 }) async {
   return const [];
 }
+
+Future<String?> writeLocalFileBytesIfAbsent({
+  required String targetPath,
+  required List<int> bytes,
+}) async {
+  return null;
+}
+
+Future<String?> readSidecarLyrics(String audioFilePath) async {
+  return null;
+}

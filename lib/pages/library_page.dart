@@ -5,6 +5,7 @@ import '../models/entry_menu_action.dart';
 import '../ui/collection_type_ui.dart';
 import '../widgets/artwork_card.dart';
 import '../widgets/graffiti_tag.dart';
+import '../widgets/track_queue_menu_button.dart';
 
 class LibraryPage extends StatelessWidget {
   const LibraryPage({
@@ -14,6 +15,8 @@ class LibraryPage extends StatelessWidget {
     required this.recentTracks,
     required this.onOpen,
     required this.onPlayRecentTrack,
+    this.onPlayNext,
+    this.onAddToQueue,
     required this.onCreateCollection,
     required this.onUploadToCollection,
     this.onPlayAll,
@@ -27,6 +30,8 @@ class LibraryPage extends StatelessWidget {
   final void Function(CollectionEntry entry) onOpen;
   final Future<void> Function(Track track, CollectionEntry entry)
   onPlayRecentTrack;
+  final Future<void> Function(Track track, CollectionEntry entry)? onPlayNext;
+  final Future<void> Function(Track track, CollectionEntry entry)? onAddToQueue;
   final VoidCallback onCreateCollection;
   final VoidCallback onUploadToCollection;
   final VoidCallback? onPlayAll;
@@ -99,6 +104,8 @@ class LibraryPage extends StatelessWidget {
               child: _RecentlyPlayedRail(
                 recentTracks: recentTracks,
                 onPlayTrack: onPlayRecentTrack,
+                onPlayNext: onPlayNext,
+                onAddToQueue: onAddToQueue,
               ),
             ),
           ),
@@ -124,7 +131,7 @@ class LibraryPage extends StatelessWidget {
                 return _PortraitCollectionCard(
                   entry: entry,
                   onOpen: () => onOpen(entry),
-                  onMenuAction: onMenuAction == null
+                  onMenuAction: onMenuAction == null || entry.isSmart
                       ? null
                       : (action) => onMenuAction!(entry, action),
                 );
@@ -138,10 +145,7 @@ class LibraryPage extends StatelessWidget {
 }
 
 class RecentTrackShortcut {
-  const RecentTrackShortcut({
-    required this.entry,
-    required this.track,
-  });
+  const RecentTrackShortcut({required this.entry, required this.track});
 
   final CollectionEntry entry;
   final Track track;
@@ -273,10 +277,14 @@ class _RecentlyPlayedRail extends StatelessWidget {
   const _RecentlyPlayedRail({
     required this.recentTracks,
     required this.onPlayTrack,
+    this.onPlayNext,
+    this.onAddToQueue,
   });
 
   final List<RecentTrackShortcut> recentTracks;
   final Future<void> Function(Track track, CollectionEntry entry) onPlayTrack;
+  final Future<void> Function(Track track, CollectionEntry entry)? onPlayNext;
+  final Future<void> Function(Track track, CollectionEntry entry)? onAddToQueue;
 
   @override
   Widget build(BuildContext context) {
@@ -303,7 +311,7 @@ class _RecentlyPlayedRail extends StatelessWidget {
             itemBuilder: (context, index) {
               final item = recentTracks[index];
               return SizedBox(
-                width: 240,
+                width: 270,
                 child: Material(
                   color: Colors.transparent,
                   child: InkWell(
@@ -343,9 +351,17 @@ class _RecentlyPlayedRail extends StatelessWidget {
                           ),
                           IconButton(
                             tooltip: 'Play',
-                            onPressed: () => onPlayTrack(item.track, item.entry),
+                            onPressed: () =>
+                                onPlayTrack(item.track, item.entry),
                             icon: const Icon(Icons.play_arrow),
                           ),
+                          if (onPlayNext != null && onAddToQueue != null)
+                            TrackQueueMenuButton(
+                              onPlayNext: () =>
+                                  onPlayNext!(item.track, item.entry),
+                              onAddToQueue: () =>
+                                  onAddToQueue!(item.track, item.entry),
+                            ),
                         ],
                       ),
                     ),

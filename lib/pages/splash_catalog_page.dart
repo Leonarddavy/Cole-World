@@ -99,7 +99,7 @@ class _SplashCatalogPageState extends State<SplashCatalogPage> {
           padding: const EdgeInsets.fromLTRB(18, 20, 18, 16),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
+            children: [
               GraffitiTag(label: widget.tagLabel),
               const SizedBox(height: 14),
               Center(
@@ -111,10 +111,7 @@ class _SplashCatalogPageState extends State<SplashCatalogPage> {
                 ),
               ),
               const SizedBox(height: 18),
-              Text(
-                'II.VI',
-                style: theme.textTheme.displayLarge,
-              ),
+              Text('II.VI', style: theme.textTheme.displayLarge),
               Text(
                 'Vault',
                 style: theme.textTheme.displayLarge?.copyWith(
@@ -156,7 +153,7 @@ class _SplashCatalogPageState extends State<SplashCatalogPage> {
                                 offset: Offset(0, 12),
                               ),
                             ],
-                        ),
+                          ),
                           padding: const EdgeInsets.all(22),
                           child: LayoutBuilder(
                             builder: (context, constraints) {

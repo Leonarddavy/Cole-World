@@ -138,7 +138,8 @@ class _NavButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final color = selected ? const Color(0xFF1B1209) : Colors.white70;
-    final baseStyle = Theme.of(context).textTheme.labelLarge ??
+    final baseStyle =
+        Theme.of(context).textTheme.labelLarge ??
         const TextStyle(fontWeight: FontWeight.w600);
     final style = baseStyle.copyWith(
       color: color,
@@ -266,7 +267,8 @@ class _GraffitiWaveClipper extends CustomClipper<Path> {
 
     double topY(double x) {
       final t = x / w;
-      final v = base +
+      final v =
+          base +
           (amp * 0.55) * sin((t * cycles * 2 * pi) + p) +
           (amp * 0.18) * sin((t * cycles2 * 2 * pi) - (p * 1.4));
       return v.clamp(0.0, amp * 1.2);
@@ -275,7 +277,8 @@ class _GraffitiWaveClipper extends CustomClipper<Path> {
     double bottomY(double x) {
       final t = x / w;
       // Opposite direction for that "infinity loop" feel.
-      final v = base +
+      final v =
+          base +
           (amp * 0.55) * sin((t * cycles * 2 * pi) - p) +
           (amp * 0.18) * sin((t * cycles2 * 2 * pi) + (p * 1.2));
       final y = h - v;

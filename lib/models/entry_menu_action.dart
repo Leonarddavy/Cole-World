@@ -1,6 +1,1 @@
-enum EntryMenuAction {
-  open,
-  editThumbnail,
-  uploadSongs,
-  deleteCollection,
-}
+enum EntryMenuAction { open, editThumbnail, uploadSongs, deleteCollection }

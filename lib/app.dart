@@ -15,13 +15,7 @@ class _JColeVaultAppState extends State<JColeVaultApp> {
   AppThemeSettings _themeSettings = const AppThemeSettings();
 
   void _onThemeSettingsChanged(AppThemeSettings next) {
-    final hasChanged =
-        _themeSettings.primaryColorValue != next.primaryColorValue ||
-        _themeSettings.secondaryColorValue != next.secondaryColorValue ||
-        _themeSettings.backgroundColorValue != next.backgroundColorValue ||
-        _themeSettings.displayFontKey != next.displayFontKey ||
-        _themeSettings.bodyFontKey != next.bodyFontKey;
-    if (!hasChanged || !mounted) {
+    if (_themeSettings == next || !mounted) {
       return;
     }
     setState(() {

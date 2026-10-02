@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:path/path.dart' as path;
@@ -160,4 +161,33 @@ List<String> _androidPathsFromDocumentId(String documentId) {
     path.normalize(path.join('/storage', volume, relative)),
     path.normalize(path.join('/storage', volume.toUpperCase(), relative)),
   ];
+}
+
+/// Writes [bytes] to [targetPath] unless a file already exists there.
+Future<String?> writeLocalFileBytesIfAbsent({
+  required String targetPath,
+  required List<int> bytes,
+}) async {
+  final file = File(targetPath);
+  if (!await file.exists()) {
+    await file.writeAsBytes(bytes, flush: true);
+  }
+  return file.path;
+}
+
+/// Reads `song.lrc` sitting next to `song.mp3`, if there is one.
+Future<String?> readSidecarLyrics(String audioFilePath) async {
+  final base = path.withoutExtension(audioFilePath);
+  for (final extension in const ['.lrc', '.LRC']) {
+    final file = File('$base$extension');
+    try {
+      if (await file.exists()) {
+        final bytes = await file.readAsBytes();
+        return utf8.decode(bytes, allowMalformed: true);
+      }
+    } catch (_) {
+      // Unreadable sidecar: treat as absent.
+    }
+  }
+  return null;
 }

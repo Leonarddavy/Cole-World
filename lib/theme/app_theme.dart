@@ -43,6 +43,25 @@ class AppThemeSettings {
     );
   }
 
+  @override
+  bool operator ==(Object other) {
+    return other is AppThemeSettings &&
+        other.primaryColorValue == primaryColorValue &&
+        other.secondaryColorValue == secondaryColorValue &&
+        other.backgroundColorValue == backgroundColorValue &&
+        other.displayFontKey == displayFontKey &&
+        other.bodyFontKey == bodyFontKey;
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    primaryColorValue,
+    secondaryColorValue,
+    backgroundColorValue,
+    displayFontKey,
+    bodyFontKey,
+  );
+
   Map<String, dynamic> toJson() {
     return {
       'primaryColorValue': primaryColorValue,
