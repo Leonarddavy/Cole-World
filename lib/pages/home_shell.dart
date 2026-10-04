@@ -11,6 +11,7 @@ import 'package:path/path.dart' as path;
 import 'package:audio_session/audio_session.dart';
 
 import '../data/seed_data.dart';
+import '../models/app_tab.dart';
 import '../models/collection_models.dart';
 import '../models/entry_menu_action.dart';
 import '../models/lyrics.dart';
@@ -24,19 +25,23 @@ import '../services/play_queue.dart';
 import '../services/smart_playlists.dart';
 import '../theme/app_theme.dart';
 import '../ui/collection_type_ui.dart';
+import '../ui/formatting.dart';
 import '../utils/audio_tags.dart';
 import '../utils/local_fs.dart';
 import '../utils/object_url.dart';
 import '../widgets/graffiti_backdrop.dart';
 import '../widgets/floating_nav_bar.dart';
 import '../widgets/graffiti_scaffold.dart';
+import '../widgets/library_track_picker.dart';
 import '../widgets/mini_player_bar.dart';
 import '../widgets/track_queue_menu_button.dart';
 import 'artist_history_page.dart';
 import 'collection_detail_page.dart';
+import 'home_page.dart';
 import 'library_page.dart';
 import 'lyrics_page.dart';
 import 'now_playing_page.dart';
+import 'settings_page.dart';
 import 'splash_catalog_page.dart';
 
 class HomeShell extends StatefulWidget {
@@ -52,8 +57,6 @@ class HomeShell extends StatefulWidget {
   @override
   State<HomeShell> createState() => _HomeShellState();
 }
-
-enum _HomeTab { albums, singles, features, playlist, story, launch }
 
 enum _SongImportSource { files, folder }
 
@@ -116,14 +119,16 @@ class _HomeShellState extends State<HomeShell> {
   StreamSubscription<Duration?>? _durationSub;
   StreamSubscription<int?>? _currentIndexSub;
 
-  int _tabIndex = 0;
-  int _previousTabIndex = 0;
-  bool _showStoryTab = true;
-  bool _showLaunchTab = true;
+  AppTab _currentTab = AppTab.home;
+  AppTab _previousTab = AppTab.home;
+  TabLayout _tabLayout = TabLayout.defaults;
+  bool _backgroundRotation = false;
+
+  /// Tracks whose length was already captured from playback this session.
+  final Set<String> _durationsRecorded = {};
   Track? _currentTrack;
   String? _currentEntryId;
   bool _isPlaying = false;
-  bool _miniPlayerExpanded = true;
   bool _shuffleEnabled = false;
   PlaybackRepeatMode _repeatMode = PlaybackRepeatMode.off;
   String? _shuffleQueueEntryId;
@@ -190,6 +195,7 @@ class _HomeShellState extends State<HomeShell> {
         return;
       }
       _setPlaybackDuration(duration ?? Duration.zero);
+      _rememberTrackDuration(duration);
     });
     _currentIndexSub = _audioPlayer.currentIndexStream.listen(
       _syncCurrentTrackFromQueueIndex,
@@ -305,37 +311,174 @@ class _HomeShellState extends State<HomeShell> {
     }
   }
 
-  List<Track> _allSingleTracks() {
-    final tracks = <Track>[];
-    for (final entry in _entries) {
-      if (entry.type != CollectionType.single) {
-        continue;
-      }
-      tracks.addAll(entry.tracks);
+  /// Collections whose songs can be put into playlists.
+  List<CollectionEntry> _playlistSources() => [
+    for (final type in const [
+      CollectionType.album,
+      CollectionType.single,
+      CollectionType.feature,
+    ])
+      ..._entries.where((entry) => entry.type == type),
+  ];
+
+  /// Adds [tracks] to a stored playlist, skipping songs already in it.
+  void _addTracksToPlaylist(String playlistId, List<Track> tracks) {
+    final playlist = _entryById(playlistId);
+    if (playlist == null || playlist.isSmart) {
+      return;
     }
-    return tracks;
+    final existing = playlist.tracks.map((track) => track.id).toSet();
+    final fresh = [
+      for (final track in tracks)
+        if (existing.add(track.id)) track,
+    ];
+    if (fresh.isEmpty) {
+      _showMessage(
+        tracks.length == 1
+            ? 'Already in ${playlist.title}.'
+            : 'Those songs are already in ${playlist.title}.',
+      );
+      return;
+    }
+    _replaceEntry(
+      _withFallbackThumbnail(
+        playlist.copyWith(tracks: [...playlist.tracks, ...fresh]),
+        fresh,
+      ),
+    );
+    _showMessage(
+      fresh.length == 1
+          ? 'Added to ${playlist.title}.'
+          : '${fresh.length} songs added to ${playlist.title}.',
+    );
   }
 
-  List<Track> _singleTracksByIds(List<String> ids) {
-    if (ids.isEmpty) {
-      return const [];
+  Future<String?> _promptPlaylistName() {
+    return showDialog<String>(
+      context: context,
+      builder: (context) => const _NamePromptDialog(
+        title: 'New playlist',
+        hint: 'Playlist name',
+        confirmLabel: 'Create',
+      ),
+    );
+  }
+
+  CollectionEntry _createPlaylist(String title, List<Track> tracks) {
+    final created = _withFallbackThumbnail(
+      CollectionEntry(
+        id: _newId(),
+        type: CollectionType.playlist,
+        title: title,
+        history: '',
+        featuredArtists: const [],
+        tracks: tracks,
+      ),
+      tracks,
+    );
+    setState(() {
+      _entries = [..._entries, created];
+    });
+    unawaited(_persistLibrary());
+    return created;
+  }
+
+  /// "Add to playlist…" for one song: pick a playlist or make a new one.
+  Future<void> _showAddToPlaylist(Track track, CollectionEntry source) async {
+    const newPlaylist = '__new__';
+    final playlists = _entries
+        .where((entry) => entry.type == CollectionType.playlist)
+        .toList();
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (context) {
+        final theme = Theme.of(context);
+        return SafeArea(
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: MediaQuery.sizeOf(context).height * 0.7,
+            ),
+            child: ListView(
+              shrinkWrap: true,
+              children: [
+                ListTile(
+                  title: Text(
+                    'Add to playlist',
+                    style: theme.textTheme.titleLarge,
+                  ),
+                  subtitle: Text(
+                    track.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                ListTile(
+                  leading: CircleAvatar(
+                    backgroundColor: theme.colorScheme.primary,
+                    foregroundColor: theme.colorScheme.onPrimary,
+                    child: const Icon(Icons.add),
+                  ),
+                  title: const Text('New playlist'),
+                  onTap: () => Navigator.pop(context, newPlaylist),
+                ),
+                for (final playlist in playlists)
+                  Builder(
+                    builder: (context) {
+                      final contains = playlist.tracks.any(
+                        (item) => item.id == track.id,
+                      );
+                      return ListTile(
+                        enabled: !contains,
+                        leading: const CircleAvatar(
+                          child: Icon(Icons.queue_music),
+                        ),
+                        title: Text(playlist.title),
+                        subtitle: Text(
+                          contains
+                              ? 'Already added'
+                              : '${playlist.tracks.length} '
+                                    '${playlist.tracks.length == 1 ? 'song' : 'songs'}',
+                        ),
+                        trailing: contains ? const Icon(Icons.check) : null,
+                        onTap: () => Navigator.pop(context, playlist.id),
+                      );
+                    },
+                  ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+    if (!mounted || choice == null) {
+      return;
     }
-    final selected = <Track>[];
-    final wanted = ids.toSet();
-    for (final entry in _entries) {
-      if (entry.type != CollectionType.single) {
-        continue;
-      }
-      for (final track in entry.tracks) {
-        if (wanted.remove(track.id)) {
-          selected.add(track);
-        }
-      }
-      if (wanted.isEmpty) {
-        break;
-      }
+    if (choice != newPlaylist) {
+      _addTracksToPlaylist(choice, [track]);
+      return;
     }
-    return selected;
+    final name = await _promptPlaylistName();
+    if (!mounted || name == null) {
+      return;
+    }
+    final created = _createPlaylist(name, [track]);
+    _showMessage('Created ${created.title}.');
+  }
+
+  /// Opens the library picker to add songs to an existing playlist.
+  Future<void> _addFromLibraryToPlaylist(CollectionEntry playlist) async {
+    final picked = await showLibraryTrackPicker(
+      context,
+      sources: _playlistSources(),
+      alreadyIncluded: playlist.tracks.map((track) => track.id).toSet(),
+      title: 'Add to ${playlist.title}',
+    );
+    if (!mounted || picked == null || picked.isEmpty) {
+      return;
+    }
+    _addTracksToPlaylist(playlist.id, picked);
   }
 
   CollectionEntry? _entryById(String id) {
@@ -527,15 +670,29 @@ class _HomeShellState extends State<HomeShell> {
     if (!mounted) {
       return null;
     }
-    final showStory = prefs['showStoryTab'];
-    final showLaunch = prefs['showLaunchTab'];
+    var tabLayout = TabLayout.fromJson(prefs['tabLayout']);
+    if (prefs['tabLayout'] == null && prefs['showStoryTab'] == false) {
+      // Carry over "Remove Story Tab" from before tabs were configurable.
+      tabLayout = tabLayout.withVisibility(AppTab.story, false);
+    }
+    final backgroundRotation = prefs['backgroundRotation'] == true;
     final editMode = prefs['editMode'];
     final customBackdropSources = _parseStringList(
       prefs['customBackdropSources'],
     );
-    final themeSettings = _normalizedThemeSettings(
+    var themeSettings = _normalizedThemeSettings(
       AppThemeSettings.fromJson(prefs['themeSettings']),
     );
+    final themeVersion = prefs['themeVersion'];
+    final migrateTheme =
+        themeVersion is! int || themeVersion < AppThemeSettings.currentVersion;
+    if (migrateTheme && themeSettings.bodyFontKey == 'permanent_marker') {
+      // The old default body font; marker lettering is hard to read in long
+      // lists, so earlier installs move to the new readable default.
+      themeSettings = themeSettings.copyWith(
+        bodyFontKey: AppThemeSettings.defaultBodyFontKey,
+      );
+    }
     final storyContent = StoryContent.fromJson(prefs['storyContent']);
     final recentPlays = _parseRecentPlays(prefs['recentPlays']);
     final lastSession = _LastSession.fromJson(prefs['lastSession']);
@@ -562,18 +719,23 @@ class _HomeShellState extends State<HomeShell> {
       _shuffleEnabledListenable.value = _shuffleEnabled;
       _repeatMode = repeatMode;
       _repeatModeListenable.value = repeatMode;
-      _showStoryTab = showStory is bool ? showStory : true;
-      _showLaunchTab = showLaunch is bool ? showLaunch : true;
+      _tabLayout = tabLayout;
+      _backgroundRotation = backgroundRotation;
       _isEditMode = editMode is bool ? editMode : false;
       _customBackdropSources = customBackdropSources;
       _themeSettings = themeSettings;
       _storyContent = storyContent;
       _recentPlays = recentPlays;
-      _clampTabIndex();
+      _ensureCurrentTabVisible();
     });
     GraffitiBackdrop.setCustomSources(customBackdropSources);
+    GraffitiBackdrop.setRotationEnabled(backgroundRotation);
     widget.onThemeSettingsChanged(themeSettings);
     _prefsHydrated = true;
+    if (migrateTheme || prefs['introSeen'] != true) {
+      // Record the migration and that the intro has been seen.
+      unawaited(_persistPrefs(notifyOnFailure: false));
+    }
     return lastSession;
   }
 
@@ -651,8 +813,11 @@ class _HomeShellState extends State<HomeShell> {
       'likedTrackIds': _likedTrackIds,
       'onlineLyrics': _onlineLyricsListenable.value,
       'playCounts': _playCounts,
-      'showStoryTab': _showStoryTab,
-      'showLaunchTab': _showLaunchTab,
+      'tabLayout': _tabLayout.toJson(),
+      'backgroundRotation': _backgroundRotation,
+      'themeVersion': AppThemeSettings.currentVersion,
+      // The shell only runs once the intro has been shown or skipped.
+      'introSeen': true,
       'editMode': _isEditMode,
       'customBackdropSources': _customBackdropSources,
       'themeSettings': _themeSettings.toJson(),
@@ -743,12 +908,6 @@ class _HomeShellState extends State<HomeShell> {
     }
   }
 
-  void _toggleMiniPlayerSize() {
-    setState(() {
-      _miniPlayerExpanded = !_miniPlayerExpanded;
-    });
-  }
-
   void _setEditMode(bool enabled) {
     if (_isEditMode == enabled) {
       return;
@@ -774,10 +933,6 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   Future<void> _openThemeEditor() async {
-    if (!_isEditMode) {
-      _showMessage('Enter Edit Mode to customize fonts and colors.');
-      return;
-    }
     final next = await showDialog<AppThemeSettings>(
       context: context,
       builder: (context) {
@@ -872,18 +1027,15 @@ class _HomeShellState extends State<HomeShell> {
     return await _copyImageIntoAppDirectory(trimmed, 'thumbnails') ?? trimmed;
   }
 
-  Future<void> _uploadBackdropImages() async {
-    if (!_isEditMode) {
-      _showMessage('Enter Edit Mode before uploading background images.');
-      return;
-    }
+  /// Resolves to how many custom backgrounds there are afterwards.
+  Future<int> _uploadBackdropImages() async {
     final result = await FilePicker.platform.pickFiles(
       type: FileType.image,
       allowMultiple: true,
       withData: kIsWeb,
     );
     if (result == null || result.files.isEmpty) {
-      return;
+      return _customBackdropSources.length;
     }
 
     final sources = <String>[];
@@ -895,7 +1047,7 @@ class _HomeShellState extends State<HomeShell> {
     }
     if (sources.isEmpty) {
       _showMessage('No valid images selected.');
-      return;
+      return _customBackdropSources.length;
     }
 
     final next = [..._customBackdropSources];
@@ -910,20 +1062,21 @@ class _HomeShellState extends State<HomeShell> {
     });
     GraffitiBackdrop.setCustomSources(next);
     unawaited(_persistPrefs());
-    _showMessage('${sources.length} background image(s) added.');
+    _showMessage(
+      sources.length == 1
+          ? 'Background image added.'
+          : '${sources.length} background images added.',
+    );
+    return next.length;
   }
 
-  void _resetBackdropImages() {
-    if (!_isEditMode) {
-      _showMessage('Enter Edit Mode before editing backgrounds.');
-      return;
-    }
+  Future<void> _resetBackdropImages() async {
     setState(() {
       _customBackdropSources = const [];
     });
     GraffitiBackdrop.setCustomSources(const []);
     unawaited(_persistPrefs());
-    _showMessage('Background images reset to default.');
+    _showMessage('Back to the built-in backgrounds.');
   }
 
   Future<void> _openStoryEditor() async {
@@ -1049,9 +1202,31 @@ class _HomeShellState extends State<HomeShell> {
     if (track == null) {
       return;
     }
+    final reduceMotion = MediaQuery.disableAnimationsOf(context);
     await Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => NowPlayingPage(
+      PageRouteBuilder<void>(
+        transitionDuration: reduceMotion
+            ? Duration.zero
+            : const Duration(milliseconds: 380),
+        reverseTransitionDuration: reduceMotion
+            ? Duration.zero
+            : const Duration(milliseconds: 300),
+        // Rises out of the mini player, like a sheet.
+        transitionsBuilder: (context, animation, secondaryAnimation, child) {
+          final curved = CurvedAnimation(
+            parent: animation,
+            curve: Curves.easeOutCubic,
+            reverseCurve: Curves.easeInCubic,
+          );
+          return SlideTransition(
+            position: Tween<Offset>(
+              begin: const Offset(0, 1),
+              end: Offset.zero,
+            ).animate(curved),
+            child: child,
+          );
+        },
+        pageBuilder: (_, _, _) => NowPlayingPage(
           title: title,
           resolveEntry: _entryById,
           currentTrackListenable: _currentTrackListenable,
@@ -1080,10 +1255,6 @@ class _HomeShellState extends State<HomeShell> {
         ),
       ),
     );
-  }
-
-  Future<void> _openQueuedNowPlaying() async {
-    await _openNowPlaying(title: 'Queued');
   }
 
   List<RecentTrackShortcut> _allRecentTrackShortcuts() {
@@ -1118,6 +1289,7 @@ class _HomeShellState extends State<HomeShell> {
         onPlayTrack: _playTrackFromEntry,
         onPlayNext: _playTrackNext,
         onAddToQueue: _addTrackToQueue,
+        onAddToPlaylist: _showAddToPlaylist,
       ),
     );
   }
@@ -1294,106 +1466,75 @@ class _HomeShellState extends State<HomeShell> {
     _showMessage('${entry.type.label} deleted.');
   }
 
-  Future<void> _deleteStoryTab() async {
-    if (!_showStoryTab) {
-      return;
+  List<AppTab> _visibleTabs() => _tabLayout.visible;
+
+  /// Falls back to the first visible tab when the current one was hidden.
+  void _ensureCurrentTabVisible() {
+    final visible = _tabLayout.visible;
+    if (!visible.contains(_currentTab)) {
+      _currentTab = visible.first;
+      _previousTab = _currentTab;
     }
-    final ok = await _confirmDelete(
-      title: 'Remove Story Tab',
-      body: 'This hides the Story tab. You can restore it later.',
-      confirmLabel: 'Remove',
+  }
+
+  void _setTabLayout(TabLayout next) {
+    setState(() {
+      _tabLayout = next;
+      _ensureCurrentTabVisible();
+    });
+    unawaited(_persistPrefs(notifyOnFailure: false));
+  }
+
+  void _setBackgroundRotation(bool enabled) {
+    setState(() => _backgroundRotation = enabled);
+    GraffitiBackdrop.setRotationEnabled(enabled);
+    unawaited(_persistPrefs(notifyOnFailure: false));
+  }
+
+  Future<bool> _setOnlineLyricsFromSettings(bool enabled) async {
+    if (enabled) {
+      return _enableOnlineLyrics();
+    }
+    _setOnlineLyrics(false);
+    return false;
+  }
+
+  Future<void> _openSettings() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => SettingsPage(
+          tabLayout: _tabLayout,
+          onTabLayoutChanged: _setTabLayout,
+          backgroundRotation: _backgroundRotation,
+          onBackgroundRotationChanged: _setBackgroundRotation,
+          customBackgroundCount: _customBackdropSources.length,
+          onUploadBackgrounds: _uploadBackdropImages,
+          onResetBackgrounds: _resetBackdropImages,
+          onOpenThemeEditor: _openThemeEditor,
+          onlineLyrics: _onlineLyricsListenable.value,
+          onSetOnlineLyrics: _setOnlineLyricsFromSettings,
+          editMode: _isEditMode,
+          onEditModeChanged: _setEditMode,
+          onRescanSongInfo: _rescanSongInfo,
+          onImportMusic: _importMusic,
+          onReplayIntro: _replayIntro,
+        ),
+      ),
     );
-    if (!ok || !mounted) {
-      return;
-    }
-    setState(() {
-      _showStoryTab = false;
-      _clampTabIndex();
-    });
-    unawaited(_persistPrefs());
   }
 
-  Future<void> _restoreStoryTab() async {
-    if (_showStoryTab) {
-      return;
-    }
-    setState(() {
-      _showStoryTab = true;
-      _clampTabIndex();
-    });
-    unawaited(_persistPrefs());
-  }
-
-  Future<void> _deleteLaunchTab() async {
-    if (!_showLaunchTab) {
-      return;
-    }
-    final ok = await _confirmDelete(
-      title: 'Remove Launch Tab',
-      body: 'This hides the Launch tab. You can restore it later.',
-      confirmLabel: 'Remove',
+  void _replayIntro() {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (routeContext) => SplashCatalogPage(
+          autoAdvance: false,
+          tagLabel: 'Intro',
+          secondaryCtaLabel: 'Close',
+          primaryCtaLabel: 'Back To Vault',
+          onFinished: () => Navigator.of(routeContext).maybePop(),
+        ),
+      ),
     );
-    if (!ok || !mounted) {
-      return;
-    }
-    setState(() {
-      _showLaunchTab = false;
-      _clampTabIndex();
-    });
-    unawaited(_persistPrefs());
-  }
-
-  Future<void> _restoreLaunchTab() async {
-    if (_showLaunchTab) {
-      return;
-    }
-    setState(() {
-      _showLaunchTab = true;
-      _clampTabIndex();
-    });
-    unawaited(_persistPrefs());
-  }
-
-  List<_HomeTab> _visibleTabs() {
-    final tabs = <_HomeTab>[
-      _HomeTab.albums,
-      _HomeTab.singles,
-      _HomeTab.features,
-      _HomeTab.playlist,
-    ];
-    if (_showStoryTab) {
-      tabs.add(_HomeTab.story);
-    }
-    if (_showLaunchTab) {
-      tabs.add(_HomeTab.launch);
-    }
-    return tabs;
-  }
-
-  void _clampTabIndex() {
-    final tabs = _visibleTabs();
-    final maxIndex = tabs.isEmpty ? 0 : tabs.length - 1;
-    if (_tabIndex > maxIndex) {
-      _tabIndex = maxIndex;
-      _previousTabIndex = _tabIndex;
-    }
-  }
-
-  String _titleForTab(_HomeTab tab) {
-    switch (tab) {
-      case _HomeTab.albums:
-        return 'Albums';
-      case _HomeTab.singles:
-        return 'Singles';
-      case _HomeTab.features:
-        return 'Features';
-      case _HomeTab.playlist:
-        return 'Playlist';
-      case _HomeTab.story:
-        return 'Story';
-      case _HomeTab.launch:
-        return 'Launch';
-    }
   }
 
   void _showMessage(String message) {
@@ -1531,6 +1672,7 @@ class _HomeShellState extends State<HomeShell> {
           artist: tags?.artist ?? artist,
           filePath: filePath,
           artworkPath: await _storeTrackArtwork(tags),
+          duration: tags?.duration,
         ),
       );
     }
@@ -1777,6 +1919,7 @@ class _HomeShellState extends State<HomeShell> {
           title: tags.title,
           artist: tags.artist,
           artworkPath: await _storeTrackArtwork(tags),
+          duration: tags.duration,
         );
         if (!updated.hasSameInfoAs(track)) {
           updates[track.id] = updated;
@@ -1882,15 +2025,20 @@ class _HomeShellState extends State<HomeShell> {
     _shuffleQueue = [...trackIds]..shuffle(_random);
   }
 
+  /// The collection's play order (shuffled if shuffle is on). Songs without
+  /// an audio file are left out, so playback never stops on one.
   List<Track> _queueForEntry(CollectionEntry entry) {
     if (!_shuffleEnabled) {
-      return entry.tracks;
+      return [
+        for (final track in entry.tracks)
+          if (track.hasFile) track,
+      ];
     }
     _ensureShuffleQueue(entry);
     final queue = <Track>[];
     for (final id in _shuffleQueue) {
       final track = _trackById(entry, id);
-      if (track != null) {
+      if (track != null && track.hasFile) {
         queue.add(track);
       }
     }
@@ -2508,15 +2656,15 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   Future<void> _createCollection(CollectionType type) async {
-    final availableSingleTracks = type == CollectionType.playlist
-        ? _allSingleTracks()
-        : const <Track>[];
+    final librarySources = type == CollectionType.playlist
+        ? _playlistSources()
+        : const <CollectionEntry>[];
     final draft = await showDialog<_NewCollectionDraft>(
       context: context,
       builder: (context) {
         return _CreateCollectionDialog(
           type: type,
-          availableSingleTracks: availableSingleTracks,
+          librarySources: librarySources,
         );
       },
     );
@@ -2536,10 +2684,10 @@ class _HomeShellState extends State<HomeShell> {
       return;
     }
 
-    final fromSingles = type == CollectionType.playlist
-        ? _singleTracksByIds(draft.selectedSingleTrackIds)
+    final fromLibrary = type == CollectionType.playlist
+        ? draft.libraryTracks
         : const <Track>[];
-    final effectiveTracks = [...fromSingles, ...tracks];
+    final effectiveTracks = [...fromLibrary, ...tracks];
 
     final created = _withFallbackThumbnail(
       CollectionEntry(
@@ -2559,9 +2707,10 @@ class _HomeShellState extends State<HomeShell> {
       _entries = [..._entries, created];
     });
     unawaited(_persistLibrary());
-    if (type == CollectionType.playlist && fromSingles.isNotEmpty) {
+    if (effectiveTracks.isNotEmpty) {
       _showMessage(
-        '${created.title} added with ${fromSingles.length} single(s).',
+        '${created.title} added with ${effectiveTracks.length} '
+        '${effectiveTracks.length == 1 ? 'song' : 'songs'}.',
       );
     } else {
       _showMessage('${created.title} added.');
@@ -2576,14 +2725,13 @@ class _HomeShellState extends State<HomeShell> {
           currentTrackListenable: _currentTrackListenable,
           playerStateStream: _audioPlayer.playerStateStream,
           pendingTrackIdListenable: _pendingTrackIdListenable,
-          onPlayTrack: _playTrackFromEntry,
-          onToggleTrack: _toggleOrPlayTrackFromEntry,
-          onOpenNowPlaying: _openNowPlaying,
-          onOpenQueuedNowPlaying: _openQueuedNowPlaying,
           queueListenable: _queueListenable,
-          onJumpToQueueItem: _jumpToQueueItem,
+          onToggleTrack: _toggleOrPlayTrackFromEntry,
+          onPlayCollection: _playCollection,
+          onAttachFile: _attachFileToTrack,
           onPlayNext: _playTrackNext,
           onAddToQueue: _addTrackToQueue,
+          onAddToPlaylist: _showAddToPlaylist,
           onShowTrackDetails: _showTrackDetailsFromEntry,
           onReorderTracks: _reorderEntryTracks,
           onDeleteTrack: _deleteTrackFromEntry,
@@ -2614,23 +2762,262 @@ class _HomeShellState extends State<HomeShell> {
       case EntryMenuAction.uploadSongs:
         await _uploadSongsToEntry(entry.id);
         break;
+      case EntryMenuAction.addFromLibrary:
+        await _addFromLibraryToPlaylist(entry);
+        break;
       case EntryMenuAction.deleteCollection:
         await _deleteCollection(entry);
         break;
     }
   }
 
-  void _onTabSelected(int index) {
-    final maxIndex = _visibleTabs().length - 1;
-    final clamped = index.clamp(0, maxIndex).toInt();
-    if (clamped == _tabIndex) {
+  void _selectTab(AppTab tab) {
+    if (tab == _currentTab || !_tabLayout.visible.contains(tab)) {
       return;
     }
     setState(() {
-      _previousTabIndex = _tabIndex;
-      _tabIndex = clamped;
+      _previousTab = _currentTab;
+      _currentTab = tab;
     });
   }
+
+  void _onTabSelected(int index) {
+    final tabs = _visibleTabs();
+    if (index >= 0 && index < tabs.length) {
+      _selectTab(tabs[index]);
+    }
+  }
+
+  /// "See all" from Home: switch to that tab, or open the list on its own
+  /// page if the user has hidden the tab.
+  void _showCollectionType(CollectionType type) {
+    final tab = AppTab.values.firstWhere((tab) => tab.collectionType == type);
+    if (_tabLayout.visible.contains(tab)) {
+      _selectTab(tab);
+      return;
+    }
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => GraffitiScaffold(
+          appBar: AppBar(title: Text('${type.label}s')),
+          body: _buildLibraryPage(type, 'pushed_${type.name}'),
+        ),
+      ),
+    );
+  }
+
+  /// Plays a collection from the top, or shuffled.
+  Future<void> _playCollection(
+    CollectionEntry entry, {
+    required bool shuffle,
+  }) async {
+    if (!entry.tracks.any((track) => track.hasFile)) {
+      _showMessage('No songs with audio in ${entry.title} yet.');
+      return;
+    }
+    final isPlayingThis =
+        _currentTrack != null &&
+        _queueListenable.value.contextEntryId == entry.id;
+    if (isPlayingThis) {
+      // Already playing from here: keep the current song and reorder what
+      // comes next, rather than restarting.
+      setState(() {
+        _shuffleQueueEntryId = null;
+        _shuffleQueue = [];
+      });
+      if (_shuffleEnabled != shuffle) {
+        _setShuffleEnabled(shuffle);
+      } else {
+        await _rebuildQueueFromContext();
+      }
+      if (!_isPlaying) {
+        await _togglePlayback();
+      }
+      return;
+    }
+    // Set shuffle directly: the queue is rebuilt by the playback below, so
+    // there's no point reshuffling the old one first.
+    setState(() {
+      _shuffleEnabled = shuffle;
+      _shuffleEnabledListenable.value = shuffle;
+      // A fresh order each time Shuffle is pressed.
+      _shuffleQueueEntryId = null;
+      _shuffleQueue = [];
+    });
+    final order = _queueForEntry(entry);
+    if (order.isEmpty) {
+      return;
+    }
+    await _playTrack(order.first, entryId: entry.id);
+  }
+
+  /// Picks an audio file for a song that has none (or replaces its file),
+  /// then plays it.
+  Future<void> _attachFileToTrack(Track track, CollectionEntry entry) async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.audio,
+      allowMultiple: false,
+      withData: kIsWeb,
+    );
+    final file = result?.files.firstOrNull;
+    if (file == null || !mounted) {
+      return;
+    }
+    final storedPath = await _persistAudioFile(file);
+    if (!mounted) {
+      return;
+    }
+    if (storedPath == null || storedPath.isEmpty) {
+      _showMessage('Could not read that audio file.');
+      return;
+    }
+    final tags = await _readTagsForStoredFile(storedPath);
+    final artwork = await _storeTrackArtwork(tags);
+    if (!mounted) {
+      return;
+    }
+    final previousPath = track.filePath;
+    final updated = track.copyWith(
+      filePath: storedPath,
+      duration: tags?.duration,
+      artworkPath: artwork,
+    );
+    // The same song can sit in several collections (e.g. a playlist).
+    setState(() {
+      _entries = [
+        for (final item in _entries)
+          if (item.tracks.any((t) => t.id == track.id))
+            _withFallbackThumbnail(
+              item.copyWith(
+                tracks: [
+                  for (final t in item.tracks) t.id == track.id ? updated : t,
+                ],
+              ),
+              [updated],
+            )
+          else
+            item,
+      ];
+    });
+    unawaited(_persistLibrary());
+    _lyricsCache.remove(track.id);
+    if (previousPath.trim().isNotEmpty) {
+      unawaited(_deleteManagedAudioIfUnused(previousPath));
+    }
+    if (_currentTrack?.id == track.id) {
+      // The player still holds the old file.
+      await _stopAndClearCurrentTrack();
+    }
+    _showMessage(
+      previousPath.trim().isEmpty
+          ? 'Audio added to ${track.title}.'
+          : 'Audio replaced for ${track.title}.',
+    );
+    final freshEntry = _entryById(entry.id) ?? entry;
+    await _playTrack(updated, entryId: freshEntry.id);
+  }
+
+  /// Turns picked files (or a folder) into a new album, named by the user.
+  Future<void> _importMusic() async {
+    final files = await _pickAudioPlatformFiles();
+    if (files.isEmpty || !mounted) {
+      return;
+    }
+    // A picked folder's name makes a good album name; files picked one by one
+    // on Android live in a picker cache folder (a timestamp or
+    // "file_picker"), which doesn't.
+    final firstPath = files.first.path;
+    final folder = firstPath == null || firstPath.isEmpty
+        ? ''
+        : path.basename(path.dirname(firstPath));
+    final looksLikeCache =
+        folder.isEmpty ||
+        folder == 'file_picker' ||
+        folder.startsWith('.') ||
+        RegExp(r'^\d+$').hasMatch(folder);
+    final suggestion = looksLikeCache ? 'Imported music' : folder;
+    final name = await showDialog<String>(
+      context: context,
+      builder: (context) => _NamePromptDialog(
+        title: 'Name this album',
+        hint: 'Album name',
+        confirmLabel: 'Import',
+        initialValue: suggestion,
+      ),
+    );
+    if (!mounted || name == null) {
+      return;
+    }
+    _showMessage('Importing ${songCount(files.length)}…');
+    final tracks = await _tracksFromFiles(files, artist: 'J. Cole');
+    if (!mounted) {
+      return;
+    }
+    if (tracks.isEmpty) {
+      _showMessage('No playable audio files were found.');
+      return;
+    }
+    final album = _withFallbackThumbnail(
+      CollectionEntry(
+        id: _newId(),
+        type: CollectionType.album,
+        title: name,
+        history: '',
+        featuredArtists: const [],
+        tracks: tracks,
+      ),
+      tracks,
+    );
+    setState(() {
+      _entries = [..._entries, album];
+    });
+    unawaited(_persistLibrary());
+    _showMessage('Imported ${songCount(tracks.length)} into ${album.title}.');
+    await _openDetail(album);
+  }
+
+  /// Stores a song's length the first time it plays, for songs imported
+  /// before lengths were read from tags. The player's current item tag
+  /// identifies the song exactly.
+  void _rememberTrackDuration(Duration? duration) {
+    if (duration == null || duration < const Duration(seconds: 1)) {
+      return;
+    }
+    final tag = _audioPlayer.sequenceState.currentSource?.tag;
+    if (tag is! MediaItem || !_durationsRecorded.add(tag.id)) {
+      return;
+    }
+    final trackId = tag.id;
+    final needsUpdate = _entries.any(
+      (entry) => entry.tracks.any(
+        (track) => track.id == trackId && track.duration == null,
+      ),
+    );
+    if (!needsUpdate) {
+      return;
+    }
+    setState(() {
+      _entries = [
+        for (final entry in _entries)
+          entry.tracks.any((t) => t.id == trackId && t.duration == null)
+              ? entry.copyWith(
+                  tracks: [
+                    for (final t in entry.tracks)
+                      t.id == trackId && t.duration == null
+                          ? t.copyWith(duration: duration)
+                          : t,
+                  ],
+                )
+              : entry,
+      ];
+    });
+    unawaited(_persistLibrary());
+  }
+
+  List<CollectionEntry> _nonEmptySmartPlaylists() => [
+    for (final id in const [likedSongsEntryId, onRepeatEntryId])
+      ?_smartEntry(id),
+  ].where((entry) => entry.tracks.isNotEmpty).toList();
 
   Widget _buildLibraryPage(CollectionType type, String keyName) {
     return LibraryPage(
@@ -2642,6 +3029,7 @@ class _HomeShellState extends State<HomeShell> {
       onPlayRecentTrack: _playTrackFromEntry,
       onPlayNext: _playTrackNext,
       onAddToQueue: _addTrackToQueue,
+      onAddToPlaylist: _showAddToPlaylist,
       onCreateCollection: () => _createCollection(type),
       onUploadToCollection: () => _uploadSongsToTypeCollection(type),
       onPlayAll: () => _playFromType(type, shuffle: false),
@@ -2650,44 +3038,110 @@ class _HomeShellState extends State<HomeShell> {
     );
   }
 
-  @override
-  Widget build(BuildContext context) {
-    final tabs = _visibleTabs();
-    final maxIndex = tabs.length - 1;
-    final effectiveIndex = _tabIndex.clamp(0, maxIndex);
-    final currentTab = tabs[effectiveIndex];
-    final page = switch (currentTab) {
-      _HomeTab.albums => _buildLibraryPage(CollectionType.album, 'albums'),
-      _HomeTab.singles => _buildLibraryPage(CollectionType.single, 'singles'),
-      _HomeTab.features => _buildLibraryPage(
-        CollectionType.feature,
-        'features',
-      ),
-      _HomeTab.playlist => _buildLibraryPage(
-        CollectionType.playlist,
-        'playlists',
-      ),
-      _HomeTab.story => ArtistHistoryPage(
+  Widget _buildTabPage(AppTab tab) {
+    final type = tab.collectionType;
+    if (type != null) {
+      return _buildLibraryPage(type, tab.name);
+    }
+    if (tab == AppTab.story) {
+      return ArtistHistoryPage(
         key: const ValueKey('story'),
         content: _storyContent,
         isEditMode: _isEditMode,
         onEditStory: _openStoryEditor,
-      ),
-      _HomeTab.launch => SplashCatalogPage(
-        key: const ValueKey('launch'),
-        autoAdvance: false,
-        tagLabel: 'Launch Screen',
-        secondaryCtaLabel: 'Back',
-        primaryCtaLabel: 'Back To Vault',
-        onFinished: () => _onTabSelected(0),
-      ),
-    };
+      );
+    }
+    final current = _currentTrack;
+    final currentEntry = _currentEntryId == null
+        ? null
+        : _entryById(_currentEntryId!);
+    return HomePage(
+      key: const ValueKey('home'),
+      entries: _entries,
+      smartPlaylists: _nonEmptySmartPlaylists(),
+      recentTracks: _allRecentTrackShortcuts(),
+      nowPlaying: current == null || currentEntry == null
+          ? null
+          : RecentTrackShortcut(entry: currentEntry, track: current),
+      isPlaying: _isPlaying,
+      onOpenCollection: _openDetail,
+      onPlayTrack: _playTrackFromEntry,
+      onTogglePlayback: _togglePlayback,
+      onOpenNowPlaying: _openNowPlaying,
+      onSeeAll: _showCollectionType,
+      onImportMusic: _importMusic,
+    );
+  }
 
-    final previousIndex = _previousTabIndex.clamp(0, maxIndex);
-    final slideFromRight = effectiveIndex > previousIndex;
-    final offsetStart = slideFromRight
-        ? const Offset(0.2, 0)
-        : const Offset(-0.2, 0);
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final tabs = _visibleTabs();
+    final currentTab = tabs.contains(_currentTab) ? _currentTab : tabs.first;
+    final effectiveIndex = tabs.indexOf(currentTab);
+    final previousIndex = tabs.indexOf(_previousTab);
+    final slideFromRight = previousIndex < 0 || effectiveIndex > previousIndex;
+    final reduceMotion = MediaQuery.disableAnimationsOf(context);
+    // Tablets, desktop and web get a side rail instead of the bottom bar.
+    final wide = MediaQuery.sizeOf(context).width >= 840;
+
+    final page = AnimatedSwitcher(
+      duration: reduceMotion
+          ? Duration.zero
+          : const Duration(milliseconds: 320),
+      switchInCurve: Curves.easeOutCubic,
+      switchOutCurve: Curves.easeInCubic,
+      transitionBuilder: (child, animation) {
+        return FadeTransition(
+          opacity: animation,
+          child: SlideTransition(
+            position: Tween<Offset>(
+              begin: Offset(slideFromRight ? 0.12 : -0.12, 0),
+              end: Offset.zero,
+            ).animate(animation),
+            child: child,
+          ),
+        );
+      },
+      child: KeyedSubtree(
+        key: ValueKey(currentTab),
+        child: _buildTabPage(currentTab),
+      ),
+    );
+
+    final miniPlayer = AnimatedSwitcher(
+      duration: reduceMotion
+          ? Duration.zero
+          : const Duration(milliseconds: 260),
+      switchInCurve: Curves.easeOutCubic,
+      switchOutCurve: Curves.easeInCubic,
+      transitionBuilder: (child, animation) {
+        return SizeTransition(
+          sizeFactor: animation,
+          child: FadeTransition(opacity: animation, child: child),
+        );
+      },
+      child: _currentTrack == null
+          ? const SizedBox.shrink(key: ValueKey('mini_empty'))
+          : MiniPlayerBar(
+              key: const ValueKey('mini_player'),
+              track: _currentTrack!,
+              entry: _currentEntryId == null
+                  ? null
+                  : _entryById(_currentEntryId!),
+              isPlaying: _isPlaying,
+              isLoading: _processingState == ProcessingState.loading,
+              isBuffering: _processingState == ProcessingState.buffering,
+              durationListenable: _durationListenable,
+              positionListenable: _positionListenable,
+              onToggle: _togglePlayback,
+              onOpenNowPlaying: _openNowPlaying,
+              onPrevious: _playPreviousInEntry,
+              onNext: _playNextInEntry,
+              isLiked: _isLiked(_currentTrack!),
+              onToggleLike: () => _toggleLike(_currentTrack!),
+            ),
+    );
 
     return GraffitiScaffold(
       appBar: AppBar(
@@ -2698,23 +3152,27 @@ class _HomeShellState extends State<HomeShell> {
           child: Image.asset(
             'assets/logo26.png',
             fit: BoxFit.contain,
-            filterQuality: FilterQuality.high,
+            cacheWidth: 160,
+            semanticLabel: 'II.VI',
           ),
         ),
         title: Text(
-          _titleForTab(currentTab),
-          style: Theme.of(
-            context,
-          ).textTheme.headlineSmall?.copyWith(letterSpacing: 1.2),
+          currentTab == AppTab.home ? 'II.VI' : currentTab.label,
+          style: theme.textTheme.headlineSmall?.copyWith(letterSpacing: 1.2),
         ),
         actions: [
           if (_isEditMode)
-            const Padding(
-              padding: EdgeInsets.only(right: 4),
+            Padding(
+              padding: const EdgeInsets.only(right: 4),
               child: Center(
-                child: Chip(
-                  avatar: Icon(Icons.edit, size: 16),
-                  label: Text('Edit Mode'),
+                child: InputChip(
+                  avatar: const Icon(Icons.edit, size: 16),
+                  label: const Text('Edit Mode'),
+                  tooltip: 'Turn off Edit Mode',
+                  onDeleted: () {
+                    _setEditMode(false);
+                    _showMessage('Edit mode off.');
+                  },
                 ),
               ),
             ),
@@ -2723,226 +3181,54 @@ class _HomeShellState extends State<HomeShell> {
             icon: const Icon(Icons.search),
             onPressed: _openLibrarySearch,
           ),
-          PopupMenuButton<String>(
-            tooltip: 'App options',
-            icon: const Icon(Icons.more_vert),
-            onSelected: (value) async {
-              switch (value) {
-                case 'enter_edit':
-                  _setEditMode(true);
-                  _showMessage('Edit mode enabled.');
-                  break;
-                case 'exit_edit':
-                  _setEditMode(false);
-                  _showMessage('Edit mode disabled.');
-                  break;
-                case 'theme_editor':
-                  await _openThemeEditor();
-                  break;
-                case 'upload_backgrounds':
-                  await _uploadBackdropImages();
-                  break;
-                case 'reset_backgrounds':
-                  _resetBackdropImages();
-                  break;
-                case 'edit_story':
-                  await _openStoryEditor();
-                  break;
-                case 'remove_story':
-                  await _deleteStoryTab();
-                  break;
-                case 'restore_story':
-                  await _restoreStoryTab();
-                  break;
-                case 'remove_launch':
-                  await _deleteLaunchTab();
-                  break;
-                case 'restore_launch':
-                  await _restoreLaunchTab();
-                  break;
-                case 'rescan_songs':
-                  await _rescanSongInfo();
-                  break;
-                case 'online_lyrics':
-                  if (_onlineLyricsListenable.value) {
-                    _setOnlineLyrics(false);
-                  } else {
-                    await _enableOnlineLyrics();
-                  }
-                  break;
-              }
-            },
-            itemBuilder: (context) => [
-              if (_isEditMode)
-                const PopupMenuItem(
-                  value: 'exit_edit',
-                  child: Text('Exit Edit Mode'),
-                )
-              else
-                const PopupMenuItem(
-                  value: 'enter_edit',
-                  child: Text('Enter Edit Mode'),
-                ),
-              if (_isEditMode) const PopupMenuDivider(),
-              if (_isEditMode)
-                const PopupMenuItem(
-                  value: 'theme_editor',
-                  child: Text('Edit Fonts & Colors'),
-                ),
-              if (_isEditMode)
-                const PopupMenuItem(
-                  value: 'upload_backgrounds',
-                  child: Text('Upload Background Images'),
-                ),
-              if (_isEditMode)
-                PopupMenuItem(
-                  value: 'reset_backgrounds',
-                  child: Text(
-                    _customBackdropSources.isEmpty
-                        ? 'Use Default Backgrounds'
-                        : 'Reset Backgrounds To Default',
-                  ),
-                ),
-              if (_isEditMode && currentTab == _HomeTab.story)
-                const PopupMenuItem(
-                  value: 'edit_story',
-                  child: Text('Edit Story Content'),
-                ),
-              const PopupMenuDivider(),
-              if (!kIsWeb)
-                const PopupMenuItem(
-                  value: 'rescan_songs',
-                  child: Text('Rescan Song Info'),
-                ),
-              CheckedPopupMenuItem(
-                value: 'online_lyrics',
-                checked: _onlineLyricsListenable.value,
-                child: const Text('Find Lyrics Online'),
-              ),
-              if (_showStoryTab)
-                const PopupMenuItem(
-                  value: 'remove_story',
-                  child: Text('Remove Story Tab'),
-                )
-              else
-                const PopupMenuItem(
-                  value: 'restore_story',
-                  child: Text('Restore Story Tab'),
-                ),
-              if (_showLaunchTab)
-                const PopupMenuItem(
-                  value: 'remove_launch',
-                  child: Text('Remove Launch Tab'),
-                )
-              else
-                const PopupMenuItem(
-                  value: 'restore_launch',
-                  child: Text('Restore Launch Tab'),
-                ),
-            ],
+          IconButton(
+            tooltip: 'Settings',
+            icon: const Icon(Icons.settings_outlined),
+            onPressed: _openSettings,
           ),
         ],
       ),
-      body: AnimatedSwitcher(
-        duration: const Duration(milliseconds: 360),
-        switchInCurve: Curves.easeOutCubic,
-        switchOutCurve: Curves.easeInCubic,
-        transitionBuilder: (child, animation) {
-          return FadeTransition(
-            opacity: animation,
-            child: SlideTransition(
-              position: Tween<Offset>(
-                begin: offsetStart,
-                end: Offset.zero,
-              ).animate(animation),
-              child: child,
-            ),
-          );
-        },
-        child: page,
-      ),
+      body: wide
+          ? Row(
+              children: [
+                NavigationRail(
+                  backgroundColor: theme.colorScheme.surfaceContainerLow
+                      .withValues(alpha: 0.7),
+                  selectedIndex: effectiveIndex,
+                  onDestinationSelected: _onTabSelected,
+                  labelType: NavigationRailLabelType.all,
+                  destinations: [
+                    for (final tab in tabs)
+                      NavigationRailDestination(
+                        icon: Icon(tab.icon),
+                        selectedIcon: Icon(tab.selectedIcon),
+                        label: Text(tab.label),
+                      ),
+                  ],
+                ),
+                Expanded(child: page),
+              ],
+            )
+          : page,
       bottomNavigationBar: SafeArea(
         top: false,
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            AnimatedSwitcher(
-              duration: const Duration(milliseconds: 280),
-              switchInCurve: Curves.easeOutCubic,
-              switchOutCurve: Curves.easeInCubic,
-              transitionBuilder: (child, animation) {
-                return SizeTransition(
-                  sizeFactor: animation,
-                  axisAlignment: -1,
-                  child: FadeTransition(opacity: animation, child: child),
-                );
-              },
-              child: _currentTrack == null
-                  ? const SizedBox.shrink(key: ValueKey('mini_empty'))
-                  : MiniPlayerBar(
-                      key: const ValueKey('mini_player'),
-                      track: _currentTrack!,
-                      entry: _currentEntryId == null
-                          ? null
-                          : _entryById(_currentEntryId!),
-                      isPlaying: _isPlaying,
-                      isLoading: _processingState == ProcessingState.loading,
-                      isBuffering:
-                          _processingState == ProcessingState.buffering,
-                      durationListenable: _durationListenable,
-                      positionListenable: _positionListenable,
-                      onToggle: _togglePlayback,
-                      onOpenNowPlaying: _openNowPlaying,
-                      isExpanded: _miniPlayerExpanded,
-                      onToggleSize: _toggleMiniPlayerSize,
-                      onSeek: _seekTo,
-                      onPrevious: _playPreviousInEntry,
-                      onNext: _playNextInEntry,
-                      onToggleShuffle: () =>
-                          _setShuffleEnabled(!_shuffleEnabled),
-                      shuffleEnabled: _shuffleEnabled,
-                      isLiked: _isLiked(_currentTrack!),
-                      onToggleLike: () => _toggleLike(_currentTrack!),
+            miniPlayer,
+            if (!wide)
+              FloatingNavBar(
+                selectedIndex: effectiveIndex,
+                onSelected: _onTabSelected,
+                items: [
+                  for (final tab in tabs)
+                    NavItem(
+                      label: tab.label,
+                      icon: tab.icon,
+                      selectedIcon: tab.selectedIcon,
                     ),
-            ),
-            FloatingNavBar(
-              selectedIndex: effectiveIndex,
-              onSelected: _onTabSelected,
-              items: [
-                const NavItem(
-                  label: 'Albums',
-                  icon: Icons.library_books_outlined,
-                  selectedIcon: Icons.library_books,
-                ),
-                const NavItem(
-                  label: 'Singles',
-                  icon: Icons.music_note_outlined,
-                  selectedIcon: Icons.music_note,
-                ),
-                const NavItem(
-                  label: 'Features',
-                  icon: Icons.mic_external_on_outlined,
-                  selectedIcon: Icons.mic_external_on,
-                ),
-                const NavItem(
-                  label: 'Playlist',
-                  icon: Icons.playlist_play_outlined,
-                  selectedIcon: Icons.playlist_play,
-                ),
-                if (_showStoryTab)
-                  const NavItem(
-                    label: 'Story',
-                    icon: Icons.history_edu_outlined,
-                    selectedIcon: Icons.history_edu,
-                  ),
-                if (_showLaunchTab)
-                  const NavItem(
-                    label: 'Launch',
-                    icon: Icons.rocket_launch_outlined,
-                    selectedIcon: Icons.rocket_launch,
-                  ),
-              ],
-            ),
+                ],
+              ),
           ],
         ),
       ),
@@ -3026,6 +3312,7 @@ class _LibrarySearchDelegate extends SearchDelegate<void> {
     required this.onPlayTrack,
     required this.onPlayNext,
     required this.onAddToQueue,
+    required this.onAddToPlaylist,
   });
 
   final List<CollectionEntry> entries;
@@ -3034,11 +3321,16 @@ class _LibrarySearchDelegate extends SearchDelegate<void> {
   final Future<void> Function(Track track, CollectionEntry entry) onPlayTrack;
   final Future<void> Function(Track track, CollectionEntry entry) onPlayNext;
   final Future<void> Function(Track track, CollectionEntry entry) onAddToQueue;
+  final Future<void> Function(Track track, CollectionEntry entry)
+  onAddToPlaylist;
 
   Widget _queueMenu(Track track, CollectionEntry entry) {
     return TrackQueueMenuButton(
+      track: track,
+      subtitle: '${track.artist} · ${entry.title}',
       onPlayNext: () => onPlayNext(track, entry),
       onAddToQueue: () => onAddToQueue(track, entry),
+      onAddToPlaylist: () => onAddToPlaylist(track, entry),
     );
   }
 
@@ -3389,7 +3681,7 @@ class _NewCollectionDraft {
     required this.history,
     required this.featuredArtists,
     required this.selectedSongs,
-    required this.selectedSingleTrackIds,
+    required this.libraryTracks,
     this.thumbnailPath,
     this.thumbnailDataBase64,
   });
@@ -3398,7 +3690,9 @@ class _NewCollectionDraft {
   final String history;
   final List<String> featuredArtists;
   final List<PlatformFile> selectedSongs;
-  final List<String> selectedSingleTrackIds;
+
+  /// Songs picked from albums, singles and features (playlists only).
+  final List<Track> libraryTracks;
   final String? thumbnailPath;
   final String? thumbnailDataBase64;
 }
@@ -3406,11 +3700,11 @@ class _NewCollectionDraft {
 class _CreateCollectionDialog extends StatefulWidget {
   const _CreateCollectionDialog({
     required this.type,
-    required this.availableSingleTracks,
+    required this.librarySources,
   });
 
   final CollectionType type;
-  final List<Track> availableSingleTracks;
+  final List<CollectionEntry> librarySources;
 
   @override
   State<_CreateCollectionDialog> createState() =>
@@ -3426,7 +3720,7 @@ class _CreateCollectionDialogState extends State<_CreateCollectionDialog> {
   String? _thumbnailDataBase64;
   String? _thumbnailLabel;
   List<PlatformFile> _selectedSongs = [];
-  Set<String> _selectedSingleTrackIds = <String>{};
+  List<Track> _libraryTracks = const [];
 
   @override
   void dispose() {
@@ -3538,108 +3832,21 @@ class _CreateCollectionDialogState extends State<_CreateCollectionDialog> {
     messenger.showSnackBar(SnackBar(content: Text(message)));
   }
 
-  Future<void> _pickTracksFromSingles() async {
-    final sourceTracks = widget.availableSingleTracks;
-    if (sourceTracks.isEmpty) {
-      return;
-    }
+  bool get _libraryHasSongs =>
+      widget.librarySources.any((entry) => entry.tracks.isNotEmpty);
 
-    final selected = Set<String>.from(_selectedSingleTrackIds);
-    final chosen = await showModalBottomSheet<Set<String>>(
-      context: context,
-      isScrollControlled: true,
-      showDragHandle: true,
-      builder: (context) {
-        return StatefulBuilder(
-          builder: (context, setModalState) {
-            return SafeArea(
-              child: FractionallySizedBox(
-                heightFactor: 0.85,
-                child: Column(
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(16, 6, 16, 6),
-                      child: Row(
-                        children: [
-                          Expanded(
-                            child: Text(
-                              'Add Singles To Playlist',
-                              style: Theme.of(context).textTheme.titleMedium,
-                            ),
-                          ),
-                          TextButton(
-                            onPressed: () {
-                              setModalState(selected.clear);
-                            },
-                            child: const Text('Clear'),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const Divider(height: 1),
-                    Expanded(
-                      child: ListView.builder(
-                        itemCount: sourceTracks.length,
-                        itemBuilder: (context, index) {
-                          final track = sourceTracks[index];
-                          final selectedNow = selected.contains(track.id);
-                          return CheckboxListTile(
-                            value: selectedNow,
-                            title: Text(
-                              track.title,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                            subtitle: Text(
-                              track.artist.isEmpty
-                                  ? 'Unknown artist'
-                                  : track.artist,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                            controlAffinity: ListTileControlAffinity.leading,
-                            onChanged: (value) {
-                              setModalState(() {
-                                if (value == true) {
-                                  selected.add(track.id);
-                                } else {
-                                  selected.remove(track.id);
-                                }
-                              });
-                            },
-                          );
-                        },
-                      ),
-                    ),
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(16, 10, 16, 16),
-                      child: Row(
-                        children: [
-                          TextButton(
-                            onPressed: () => Navigator.pop(context),
-                            child: const Text('Cancel'),
-                          ),
-                          const Spacer(),
-                          FilledButton(
-                            onPressed: () => Navigator.pop(context, selected),
-                            child: const Text('Done'),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            );
-          },
-        );
-      },
+  Future<void> _pickFromLibrary() async {
+    final picked = await showLibraryTrackPicker(
+      context,
+      sources: widget.librarySources,
+      initiallySelected: _libraryTracks.map((track) => track.id).toSet(),
+      title: 'Songs for this playlist',
     );
-    if (!mounted || chosen == null) {
+    if (!mounted || picked == null) {
       return;
     }
     setState(() {
-      _selectedSingleTrackIds = chosen;
+      _libraryTracks = picked;
     });
   }
 
@@ -3661,7 +3868,7 @@ class _CreateCollectionDialogState extends State<_CreateCollectionDialog> {
         history: _historyController.text.trim(),
         featuredArtists: featured,
         selectedSongs: _selectedSongs,
-        selectedSingleTrackIds: _selectedSingleTrackIds.toList(),
+        libraryTracks: _libraryTracks,
         thumbnailPath: _thumbnailPath,
         thumbnailDataBase64: _thumbnailDataBase64,
       ),
@@ -3730,19 +3937,20 @@ class _CreateCollectionDialogState extends State<_CreateCollectionDialog> {
               FilledButton.tonalIcon(
                 icon: const Icon(Icons.library_music),
                 label: Text(
-                  _selectedSingleTrackIds.isEmpty
-                      ? 'Add From Existing Singles'
-                      : '${_selectedSingleTrackIds.length} single(s) added',
+                  _libraryTracks.isEmpty
+                      ? 'Add Songs From Library'
+                      : '${_libraryTracks.length} '
+                            '${_libraryTracks.length == 1 ? 'song' : 'songs'} '
+                            'from library',
                 ),
-                onPressed: widget.availableSingleTracks.isEmpty
-                    ? null
-                    : _pickTracksFromSingles,
+                onPressed: _libraryHasSongs ? _pickFromLibrary : null,
               ),
-              if (widget.availableSingleTracks.isEmpty)
+              if (!_libraryHasSongs)
                 Padding(
                   padding: const EdgeInsets.only(top: 8),
                   child: Text(
-                    'No singles available yet. Add songs in Singles first.',
+                    'Your albums, singles and features have no songs yet. '
+                    'Upload some there first.',
                     style: Theme.of(context).textTheme.bodySmall,
                   ),
                 ),
@@ -4217,4 +4425,70 @@ class _ColorOption {
 
   final String label;
   final int value;
+}
+
+class _NamePromptDialog extends StatefulWidget {
+  const _NamePromptDialog({
+    required this.title,
+    required this.hint,
+    required this.confirmLabel,
+    this.initialValue = '',
+  });
+
+  final String title;
+  final String hint;
+  final String confirmLabel;
+  final String initialValue;
+
+  @override
+  State<_NamePromptDialog> createState() => _NamePromptDialogState();
+}
+
+class _NamePromptDialogState extends State<_NamePromptDialog> {
+  late final TextEditingController _controller =
+      TextEditingController(text: widget.initialValue)
+        ..selection = TextSelection(
+          baseOffset: 0,
+          extentOffset: widget.initialValue.length,
+        );
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final name = _controller.text.trim();
+    if (name.isNotEmpty) {
+      Navigator.pop(context, name);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text(widget.title),
+      content: TextField(
+        controller: _controller,
+        autofocus: true,
+        textCapitalization: TextCapitalization.sentences,
+        decoration: InputDecoration(hintText: widget.hint),
+        onSubmitted: (_) => _submit(),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        ValueListenableBuilder<TextEditingValue>(
+          valueListenable: _controller,
+          builder: (context, value, _) => FilledButton(
+            onPressed: value.text.trim().isEmpty ? null : _submit,
+            child: Text(widget.confirmLabel),
+          ),
+        ),
+      ],
+    );
+  }
 }

@@ -1,6 +1,7 @@
-import 'dart:math';
-
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
+import '../theme/graffiti_surfaces.dart';
 
 class NavItem {
   const NavItem({required this.label, required this.icon, this.selectedIcon});
@@ -10,122 +11,130 @@ class NavItem {
   final IconData? selectedIcon;
 }
 
+/// Bottom navigation as standalone floating buttons: [visibleCount] fit the
+/// width at once and the rest are a swipe away, with dots showing the page.
 class FloatingNavBar extends StatefulWidget {
   const FloatingNavBar({
     super.key,
     required this.items,
     required this.selectedIndex,
     required this.onSelected,
+    this.visibleCount = 3,
   });
 
   final List<NavItem> items;
   final int selectedIndex;
   final ValueChanged<int> onSelected;
+  final int visibleCount;
 
   @override
   State<FloatingNavBar> createState() => _FloatingNavBarState();
 }
 
-class _FloatingNavBarState extends State<FloatingNavBar>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller;
+class _FloatingNavBarState extends State<FloatingNavBar> {
+  late final PageController _pageController = PageController(
+    initialPage: _pageOf(widget.selectedIndex),
+  );
+  late int _page = _pageOf(widget.selectedIndex);
+
+  int get _pageCount => (widget.items.length / widget.visibleCount).ceil();
+
+  int _pageOf(int index) => index ~/ widget.visibleCount;
 
   @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 3600),
-    )..repeat();
+  void didUpdateWidget(covariant FloatingNavBar oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Selection changed from elsewhere (e.g. "Back To Vault"): bring the
+    // selected button into view.
+    final target = _pageOf(widget.selectedIndex).clamp(0, _pageCount - 1);
+    if (widget.selectedIndex != oldWidget.selectedIndex &&
+        target != _page &&
+        _pageController.hasClients) {
+      _pageController.animateToPage(
+        target,
+        duration: const Duration(milliseconds: 360),
+        curve: Curves.easeOutCubic,
+      );
+    }
   }
 
   @override
   void dispose() {
-    _controller.dispose();
+    _pageController.dispose();
     super.dispose();
+  }
+
+  void _select(int index) {
+    if (index != widget.selectedIndex) {
+      HapticFeedback.selectionClick();
+    }
+    widget.onSelected(index);
   }
 
   @override
   Widget build(BuildContext context) {
     final items = widget.items;
-    final selectedIndex = widget.selectedIndex;
-    final onSelected = widget.onSelected;
+    final perPage = widget.visibleCount;
 
-    final denominator = items.length <= 1 ? 1 : items.length - 1;
-    final x = -1 + (2 * selectedIndex / denominator);
-
-    return Container(
-      margin: const EdgeInsets.fromLTRB(14, 0, 14, 14),
-      decoration: const BoxDecoration(
-        boxShadow: [
-          BoxShadow(
-            color: Color(0x80000000),
-            blurRadius: 22,
-            offset: Offset(0, 16),
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(10, 0, 10, 4),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SizedBox(
+            height: 60,
+            child: PageView.builder(
+              controller: _pageController,
+              itemCount: _pageCount,
+              onPageChanged: (page) => setState(() => _page = page),
+              itemBuilder: (context, page) {
+                return Row(
+                  children: [
+                    for (var slot = 0; slot < perPage; slot++)
+                      Expanded(
+                        child: Builder(
+                          builder: (context) {
+                            final index = page * perPage + slot;
+                            if (index >= items.length) {
+                              return const SizedBox.shrink();
+                            }
+                            return Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 5,
+                                vertical: 6,
+                              ),
+                              child: _FloatingNavButton(
+                                item: items[index],
+                                selected: index == widget.selectedIndex,
+                                onTap: () => _select(index),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                  ],
+                );
+              },
+            ),
           ),
-        ],
-      ),
-      child: AnimatedBuilder(
-        animation: _controller,
-        builder: (context, child) {
-          final phase = _controller.value;
-          return ClipPath(
-            clipper: _GraffitiWaveClipper(phase: phase),
-            child: DecoratedBox(
-              decoration: const BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                  colors: [Color(0xFF1C1612), Color(0xFF0E0A08)],
-                ),
-              ),
-              child: CustomPaint(
-                foregroundPainter: _GraffitiBarPainter(phase: phase),
-                child: child,
+          if (_pageCount > 1)
+            _PageDots(
+              count: _pageCount,
+              current: _page,
+              onTap: (page) => _pageController.animateToPage(
+                page,
+                duration: const Duration(milliseconds: 320),
+                curve: Curves.easeOutCubic,
               ),
             ),
-          );
-        },
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
-          child: Stack(
-            children: [
-              Positioned.fill(
-                child: AnimatedAlign(
-                  duration: const Duration(milliseconds: 360),
-                  curve: Curves.easeOutCubic,
-                  alignment: Alignment(x, 0),
-                  child: FractionallySizedBox(
-                    widthFactor: 1 / items.length,
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 6),
-                      child: _SelectedSmear(selected: true),
-                    ),
-                  ),
-                ),
-              ),
-              Row(
-                children: [
-                  for (int index = 0; index < items.length; index++)
-                    Expanded(
-                      child: _NavButton(
-                        item: items[index],
-                        selected: selectedIndex == index,
-                        onTap: () => onSelected(index),
-                      ),
-                    ),
-                ],
-              ),
-            ],
-          ),
-        ),
+        ],
       ),
     );
   }
 }
 
-class _NavButton extends StatelessWidget {
-  const _NavButton({
+class _FloatingNavButton extends StatelessWidget {
+  const _FloatingNavButton({
     required this.item,
     required this.selected,
     required this.onTap,
@@ -137,49 +146,81 @@ class _NavButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = selected ? const Color(0xFF1B1209) : Colors.white70;
-    final baseStyle =
-        Theme.of(context).textTheme.labelLarge ??
-        const TextStyle(fontWeight: FontWeight.w600);
-    final style = baseStyle.copyWith(
-      color: color,
-      fontSize: selected ? 12 : 11,
-      fontWeight: selected ? FontWeight.w700 : FontWeight.w600,
-      letterSpacing: selected ? 1.0 : 0.7,
-    );
+    final scheme = Theme.of(context).colorScheme;
+    final foreground = selected ? scheme.onPrimary : scheme.onSurface;
+    final labelStyle =
+        (Theme.of(context).textTheme.labelLarge ?? const TextStyle()).copyWith(
+          color: foreground,
+          fontSize: 11,
+          fontWeight: FontWeight.w700,
+          letterSpacing: selected ? 1.0 : 0.6,
+        );
 
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(16),
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 8),
-          child: AnimatedSlide(
-            offset: selected ? Offset.zero : const Offset(0, 0.06),
-            duration: const Duration(milliseconds: 280),
-            curve: Curves.easeOutCubic,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                AnimatedScale(
-                  scale: selected ? 1.1 : 1.0,
-                  duration: const Duration(milliseconds: 250),
-                  child: Icon(
-                    selected ? (item.selectedIcon ?? item.icon) : item.icon,
-                    color: color,
-                  ),
+    return Semantics(
+      button: true,
+      selected: selected,
+      label: item.label,
+      excludeSemantics: true,
+      child: AnimatedScale(
+        scale: selected ? 1.0 : 0.94,
+        duration: const Duration(milliseconds: 240),
+        curve: Curves.easeOutBack,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 260),
+          curve: Curves.easeOutCubic,
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(22),
+            boxShadow: [
+              BoxShadow(
+                color: selected
+                    ? scheme.primary.withValues(alpha: 0.4)
+                    : const Color(0x99000000),
+                blurRadius: selected ? 16 : 10,
+                offset: const Offset(0, 5),
+              ),
+            ],
+          ),
+          child: Material(
+            color: Colors.transparent,
+            clipBehavior: Clip.antiAlias,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(22),
+              side: BorderSide(
+                color: selected
+                    ? scheme.onPrimary.withValues(alpha: 0.4)
+                    : scheme.outline,
+                width: 1.2,
+              ),
+            ),
+            child: Ink(
+              decoration: BoxDecoration(
+                gradient: selected
+                    ? scheme.accentGradient
+                    : scheme.raisedGradient,
+              ),
+              child: InkWell(
+                onTap: onTap,
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(
+                      selected ? (item.selectedIcon ?? item.icon) : item.icon,
+                      color: foreground,
+                      size: 22,
+                    ),
+                    const SizedBox(width: 6),
+                    Flexible(
+                      child: Text(
+                        item.label.toUpperCase(),
+                        maxLines: 1,
+                        overflow: TextOverflow.fade,
+                        softWrap: false,
+                        style: labelStyle,
+                      ),
+                    ),
+                  ],
                 ),
-                const SizedBox(height: 2),
-                AnimatedDefaultTextStyle(
-                  duration: const Duration(milliseconds: 200),
-                  style: style,
-                  child: Transform.rotate(
-                    angle: selected ? -0.03 : 0.02,
-                    child: Text(item.label.toUpperCase()),
-                  ),
-                ),
-              ],
+              ),
             ),
           ),
         ),
@@ -188,193 +229,42 @@ class _NavButton extends StatelessWidget {
   }
 }
 
-class _SelectedSmear extends StatelessWidget {
-  const _SelectedSmear({required this.selected});
+class _PageDots extends StatelessWidget {
+  const _PageDots({
+    required this.count,
+    required this.current,
+    required this.onTap,
+  });
 
-  final bool selected;
+  final int count;
+  final int current;
+  final ValueChanged<int> onTap;
 
   @override
   Widget build(BuildContext context) {
-    if (!selected) {
-      return const SizedBox.shrink();
-    }
-    return CustomPaint(
-      painter: const _SmearPainter(),
-      child: const SizedBox.expand(),
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        for (var page = 0; page < count; page++)
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () => onTap(page),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 3),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 240),
+                width: page == current ? 18 : 6,
+                height: 6,
+                decoration: BoxDecoration(
+                  color: page == current
+                      ? Theme.of(context).colorScheme.primary
+                      : Colors.white30,
+                  borderRadius: BorderRadius.circular(3),
+                ),
+              ),
+            ),
+          ),
+      ],
     );
-  }
-}
-
-class _SmearPainter extends CustomPainter {
-  const _SmearPainter();
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final rect = Offset.zero & size;
-    final rrect = RRect.fromRectAndRadius(
-      rect.deflate(1.5),
-      const Radius.circular(18),
-    );
-
-    // Soft glow underneath.
-    final glow = Paint()
-      ..color = const Color(0x33FFB547)
-      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 16);
-    canvas.drawRRect(rrect, glow);
-
-    // Main paint fill.
-    final fill = Paint()
-      ..shader = const LinearGradient(
-        begin: Alignment.topLeft,
-        end: Alignment.bottomRight,
-        colors: [Color(0xFFFFB547), Color(0xFFB8742C)],
-      ).createShader(rect);
-    canvas.drawRRect(rrect, fill);
-
-    // Slight "hand-drawn" outline by double-stroking with tiny offsets.
-    final outline = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.4
-      ..color = const Color(0xAA1B1209);
-    canvas.save();
-    canvas.translate(0.6, 0.2);
-    canvas.drawRRect(rrect, outline);
-    canvas.translate(-1.1, 0.1);
-    canvas.drawRRect(rrect, outline..color = const Color(0x551B1209));
-    canvas.restore();
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
-}
-
-class _GraffitiWaveClipper extends CustomClipper<Path> {
-  const _GraffitiWaveClipper({required this.phase});
-
-  // 0..1 repeating value.
-  final double phase;
-
-  static Path pathForSize(Size size, {required double phase}) {
-    final w = size.width;
-    final h = size.height;
-    const r = 22.0;
-
-    final amp = min(8.0, h * 0.18);
-    final base = amp * 0.45;
-    final cycles = 2.4;
-    final cycles2 = 1.1;
-    final p = phase * 2 * pi;
-
-    double topY(double x) {
-      final t = x / w;
-      final v =
-          base +
-          (amp * 0.55) * sin((t * cycles * 2 * pi) + p) +
-          (amp * 0.18) * sin((t * cycles2 * 2 * pi) - (p * 1.4));
-      return v.clamp(0.0, amp * 1.2);
-    }
-
-    double bottomY(double x) {
-      final t = x / w;
-      // Opposite direction for that "infinity loop" feel.
-      final v =
-          base +
-          (amp * 0.55) * sin((t * cycles * 2 * pi) - p) +
-          (amp * 0.18) * sin((t * cycles2 * 2 * pi) + (p * 1.2));
-      final y = h - v;
-      return y.clamp(h - amp * 1.2, h);
-    }
-
-    final startTop = topY(r);
-    final startBottom = bottomY(w - r);
-
-    final segments = max(16, ((w - 2 * r) / 10).round());
-
-    final path = Path();
-    path.moveTo(0, r);
-    path.quadraticBezierTo(0, 0, r, startTop);
-
-    for (int i = 1; i <= segments; i++) {
-      final x = r + ((w - 2 * r) * i / segments);
-      path.lineTo(x, topY(x));
-    }
-
-    path.quadraticBezierTo(w, 0, w, r);
-    path.lineTo(w, h - r);
-    path.quadraticBezierTo(w, h, w - r, startBottom);
-
-    for (int i = 1; i <= segments; i++) {
-      final x = (w - r) - ((w - 2 * r) * i / segments);
-      path.lineTo(x, bottomY(x));
-    }
-
-    path.quadraticBezierTo(0, h, 0, h - r);
-    path.lineTo(0, r);
-    path.close();
-    return path;
-  }
-
-  @override
-  Path getClip(Size size) => pathForSize(size, phase: phase);
-
-  @override
-  bool shouldReclip(covariant _GraffitiWaveClipper oldClipper) {
-    return (oldClipper.phase - phase).abs() > 0.0001;
-  }
-}
-
-class _GraffitiBarPainter extends CustomPainter {
-  const _GraffitiBarPainter({required this.phase});
-
-  final double phase;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final path = _GraffitiWaveClipper.pathForSize(size, phase: phase);
-    final rect = Offset.zero & size;
-
-    // Border: slightly uneven, like marker/paint.
-    final border = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.8
-      ..color = Colors.white.withValues(alpha: 0.14);
-    canvas.drawPath(path, border);
-
-    final border2 = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.2
-      ..color = const Color(0x55000000);
-    canvas.save();
-    canvas.translate(0.8, 1.0);
-    canvas.drawPath(path, border2);
-    canvas.restore();
-
-    // Spray texture overlay.
-    final spray = Paint()..style = PaintingStyle.fill;
-    final seed = 1337;
-    final r = Random(seed);
-    for (int i = 0; i < 110; i++) {
-      final x = r.nextDouble() * size.width;
-      final y = r.nextDouble() * size.height;
-      final radius = r.nextDouble() * 1.6 + 0.2;
-      spray.color = Colors.white.withValues(alpha: r.nextDouble() * 0.06);
-      canvas.drawCircle(Offset(x, y), radius, spray);
-    }
-
-    // A faint highlight streak to push the "painted" feel.
-    final streak = Paint()
-      ..shader = const LinearGradient(
-        begin: Alignment.topLeft,
-        end: Alignment.bottomRight,
-        colors: [Color(0x22FFFFFF), Color(0x00FFFFFF)],
-        stops: [0.0, 0.7],
-      ).createShader(rect)
-      ..blendMode = BlendMode.screen;
-    canvas.drawRect(rect, streak);
-  }
-
-  @override
-  bool shouldRepaint(covariant _GraffitiBarPainter oldDelegate) {
-    return (oldDelegate.phase - phase).abs() > 0.0001;
   }
 }

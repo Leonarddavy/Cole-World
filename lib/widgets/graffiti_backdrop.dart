@@ -6,6 +6,11 @@ import 'package:flutter/material.dart';
 
 import '../utils/local_image.dart';
 
+/// The photo-and-spray-paint background behind every screen.
+///
+/// All backdrops show the same image: one is picked per app launch, and when
+/// rotation is turned on a single shared timer advances it for every screen
+/// at once (rather than one timer per open page).
 class GraffitiBackdrop extends StatefulWidget {
   const GraffitiBackdrop({super.key});
 
@@ -20,14 +25,32 @@ class GraffitiBackdrop extends StatefulWidget {
     'assets/KEKE6.jpg',
   ];
 
+  static const Duration rotationInterval = Duration(seconds: 12);
+
   static final ValueNotifier<List<String>> _sourcesListenable = ValueNotifier([
     ...defaultShowcaseAssets,
   ]);
+
+  /// Off by default: a changing background competes with the content.
+  static final ValueNotifier<bool> _rotationEnabled = ValueNotifier(false);
+
+  /// Shared position in the image list, offset by a per-launch random start.
+  static final ValueNotifier<int> _step = ValueNotifier(0);
+  static final int _launchOffset = Random().nextInt(1 << 16);
+  static Timer? _timer;
+  static int _mounted = 0;
 
   static ValueListenable<List<String>> get sourcesListenable =>
       _sourcesListenable;
 
   static List<String> get currentSources => _sourcesListenable.value;
+
+  static bool get rotationEnabled => _rotationEnabled.value;
+
+  static void setRotationEnabled(bool enabled) {
+    _rotationEnabled.value = enabled;
+    _syncTimer();
+  }
 
   static void setCustomSources(List<String> customSources) {
     final cleaned = customSources
@@ -35,20 +58,22 @@ class GraffitiBackdrop extends StatefulWidget {
         .where((item) => item.isNotEmpty)
         .toList();
     final next = cleaned.isEmpty ? [...defaultShowcaseAssets] : cleaned;
-    final previous = _sourcesListenable.value;
-    var same = next.length == previous.length;
-    if (same) {
-      for (int i = 0; i < next.length; i++) {
-        if (next[i] != previous[i]) {
-          same = false;
-          break;
-        }
-      }
-    }
-    if (same) {
+    if (listEquals(next, _sourcesListenable.value)) {
       return;
     }
     _sourcesListenable.value = next;
+    _syncTimer();
+  }
+
+  static void _syncTimer() {
+    final shouldRun =
+        _rotationEnabled.value && _mounted > 0 && currentSources.length > 1;
+    if (shouldRun && _timer == null) {
+      _timer = Timer.periodic(rotationInterval, (_) => _step.value++);
+    } else if (!shouldRun) {
+      _timer?.cancel();
+      _timer = null;
+    }
   }
 
   @override
@@ -56,155 +81,128 @@ class GraffitiBackdrop extends StatefulWidget {
 }
 
 class _GraffitiBackdropState extends State<GraffitiBackdrop> {
-  Timer? _timer;
-  int _index = 0;
-
   @override
   void initState() {
     super.initState();
-    _timer = Timer.periodic(const Duration(seconds: 7), (_) {
-      final sources = GraffitiBackdrop.currentSources;
-      if (!mounted || sources.isEmpty) {
-        return;
-      }
-      setState(() => _index = (_index + 1) % sources.length);
-    });
-  }
-
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    for (final source in GraffitiBackdrop.currentSources) {
-      if (!source.startsWith('assets/')) {
-        continue;
-      }
-      precacheImage(AssetImage(source), context).catchError((_) {});
-    }
+    GraffitiBackdrop._mounted++;
+    GraffitiBackdrop._syncTimer();
   }
 
   @override
   void dispose() {
-    _timer?.cancel();
+    GraffitiBackdrop._mounted--;
+    GraffitiBackdrop._syncTimer();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final reduceMotion = MediaQuery.disableAnimationsOf(context);
 
     return IgnorePointer(
       child: ValueListenableBuilder<List<String>>(
-        valueListenable: GraffitiBackdrop.sourcesListenable,
+        valueListenable: GraffitiBackdrop._sourcesListenable,
         builder: (context, sources, _) {
-          final source = sources.isEmpty
-              ? null
-              : sources[_index % sources.length];
-
-          return Stack(
-            children: [
-              Positioned.fill(
-                child: AnimatedSwitcher(
-                  duration: const Duration(milliseconds: 1400),
-                  switchInCurve: Curves.easeOutCubic,
-                  switchOutCurve: Curves.easeInCubic,
-                  transitionBuilder: (child, animation) {
-                    return FadeTransition(
-                      opacity: animation,
-                      child: ScaleTransition(
-                        scale: Tween<double>(
-                          begin: 1.02,
-                          end: 1.0,
-                        ).animate(animation),
-                        child: child,
+          return ValueListenableBuilder<int>(
+            valueListenable: GraffitiBackdrop._step,
+            builder: (context, step, _) {
+              final source = sources.isEmpty
+                  ? null
+                  : sources[(GraffitiBackdrop._launchOffset +
+                            (reduceMotion ? 0 : step)) %
+                        sources.length];
+              return Stack(
+                children: [
+                  Positioned.fill(
+                    child: AnimatedSwitcher(
+                      duration: reduceMotion
+                          ? Duration.zero
+                          : const Duration(milliseconds: 1400),
+                      switchInCurve: Curves.easeOutCubic,
+                      switchOutCurve: Curves.easeInCubic,
+                      child: source == null
+                          ? const SizedBox.expand()
+                          : _BackdropImage(
+                              key: ValueKey(source),
+                              source: source,
+                            ),
+                    ),
+                  ),
+                  // Darker than before at the top and bottom, where text and
+                  // controls sit, so content stays readable over any photo.
+                  const DecoratedBox(
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topCenter,
+                        end: Alignment.bottomCenter,
+                        colors: [
+                          Color(0xCC0B0A09),
+                          Color(0x660B0A09),
+                          Color(0xD90B0A09),
+                        ],
+                        stops: [0.0, 0.45, 1.0],
                       ),
-                    );
-                  },
-                  child: source == null
-                      ? const SizedBox.expand()
-                      : _BackdropImage(key: ValueKey(source), source: source),
-                ),
-              ),
-              Container(
-                decoration: const BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.topCenter,
-                    end: Alignment.bottomCenter,
-                    colors: [
-                      Color(0xB30B0A09),
-                      Color(0x330B0A09),
-                      Color(0xB30B0A09),
-                    ],
-                    stops: [0.0, 0.52, 1.0],
+                    ),
+                    child: SizedBox.expand(),
                   ),
-                ),
-              ),
-              Positioned(
-                left: -120,
-                top: -140,
-                child: Container(
-                  width: 360,
-                  height: 360,
-                  decoration: const BoxDecoration(
-                    shape: BoxShape.circle,
-                    gradient: RadialGradient(
-                      colors: [Color(0x553A2411), Color(0x0022160C)],
+                  Positioned(
+                    left: -120,
+                    top: -140,
+                    child: _Glow(color: scheme.primary, alpha: 0.18),
+                  ),
+                  Positioned(
+                    right: -140,
+                    bottom: -120,
+                    child: _Glow(color: scheme.secondary, alpha: 0.16),
+                  ),
+                  const Positioned.fill(
+                    child: RepaintBoundary(
+                      child: CustomPaint(painter: _SprayPainter()),
                     ),
                   ),
-                ),
-              ),
-              Positioned(
-                right: -140,
-                bottom: -120,
-                child: Container(
-                  width: 360,
-                  height: 360,
-                  decoration: const BoxDecoration(
-                    shape: BoxShape.circle,
-                    gradient: RadialGradient(
-                      colors: [Color(0x4433BEB2), Color(0x00111412)],
-                    ),
-                  ),
-                ),
-              ),
-              Positioned.fill(
-                child: Opacity(
-                  opacity: 0.06,
-                  child: Transform.rotate(
-                    angle: -0.08,
-                    child: Container(
-                      decoration: const BoxDecoration(
-                        gradient: LinearGradient(
-                          colors: [
-                            Colors.transparent,
-                            Color(0x22FFFFFF),
-                            Colors.transparent,
-                          ],
-                          stops: [0.46, 0.5, 0.54],
-                          tileMode: TileMode.repeated,
-                        ),
+                  Positioned(
+                    right: 18,
+                    bottom: 18,
+                    child: Text(
+                      'VAULT',
+                      style: theme.textTheme.displayLarge?.copyWith(
+                        fontSize: 86,
+                        color: Colors.white.withValues(alpha: 0.05),
+                        letterSpacing: 6,
                       ),
                     ),
                   ),
-                ),
-              ),
-              const Positioned.fill(
-                child: CustomPaint(painter: _SprayPainter()),
-              ),
-              Positioned(
-                right: 18,
-                bottom: 18,
-                child: Text(
-                  'VAULT',
-                  style: theme.textTheme.displayLarge?.copyWith(
-                    fontSize: 86,
-                    color: Colors.white.withValues(alpha: 0.05),
-                    letterSpacing: 6,
-                  ),
-                ),
-              ),
-            ],
+                ],
+              );
+            },
           );
         },
+      ),
+    );
+  }
+}
+
+class _Glow extends StatelessWidget {
+  const _Glow({required this.color, required this.alpha});
+
+  final Color color;
+  final double alpha;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 360,
+      height: 360,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        gradient: RadialGradient(
+          colors: [
+            color.withValues(alpha: alpha),
+            color.withValues(alpha: 0),
+          ],
+        ),
       ),
     );
   }
@@ -220,10 +218,9 @@ class _BackdropImage extends StatelessWidget {
       return Image.asset(
         source,
         fit: BoxFit.cover,
-        alignment: Alignment.center,
         width: double.infinity,
         height: double.infinity,
-        filterQuality: FilterQuality.high,
+        filterQuality: FilterQuality.medium,
       );
     }
     if (canLoadLocalImage(source)) {
@@ -232,48 +229,18 @@ class _BackdropImage extends StatelessWidget {
     return Image.network(
       source,
       fit: BoxFit.cover,
-      alignment: Alignment.center,
       width: double.infinity,
       height: double.infinity,
-      filterQuality: FilterQuality.high,
-      errorBuilder: (_, _, _) {
-        return const SizedBox.expand();
-      },
+      filterQuality: FilterQuality.medium,
+      errorBuilder: (_, _, _) => const SizedBox.expand(),
     );
   }
 
   @override
   Widget build(BuildContext context) {
-    const contrast = 1.08;
-    const offset = (1 - contrast) * 128;
-
     return DecoratedBox(
       decoration: const BoxDecoration(color: Color(0xFF0B0A09)),
-      child: ColorFiltered(
-        colorFilter: const ColorFilter.matrix([
-          contrast,
-          0,
-          0,
-          0,
-          offset,
-          0,
-          contrast,
-          0,
-          0,
-          offset,
-          0,
-          0,
-          contrast,
-          0,
-          offset,
-          0,
-          0,
-          0,
-          1,
-          0,
-        ]),
-        child: _buildSourceImage(),
-      ),
+      child: _buildSourceImage(),
     );
   }
 }
@@ -284,14 +251,13 @@ class _SprayPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final random = Random(1337);
+    final paint = Paint()..style = PaintingStyle.fill;
     for (int i = 0; i < 220; i++) {
       final dx = random.nextDouble() * size.width;
       final dy = random.nextDouble() * size.height;
       final radius = random.nextDouble() * 1.4 + 0.3;
       final opacity = random.nextDouble() * 0.05 + 0.02;
-      final paint = Paint()
-        ..color = Colors.white.withValues(alpha: opacity)
-        ..style = PaintingStyle.fill;
+      paint.color = Colors.white.withValues(alpha: opacity);
       canvas.drawCircle(Offset(dx, dy), radius, paint);
     }
   }

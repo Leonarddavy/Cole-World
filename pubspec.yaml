@@ -74,6 +74,8 @@ flutter:
 
   assets:
     - assets/
+    # Default fonts bundled so the app looks right on first launch, offline.
+    - assets/google_fonts/
 
 flutter_launcher_icons:
   android: true

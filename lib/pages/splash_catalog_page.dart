@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../theme/graffiti_surfaces.dart';
 import '../widgets/graffiti_scaffold.dart';
 import '../widgets/graffiti_tag.dart';
 
@@ -106,6 +107,8 @@ class _SplashCatalogPageState extends State<SplashCatalogPage> {
                 child: Image.asset(
                   'assets/logo26.png',
                   height: 86,
+                  // The source is 1536x1024; decode near display size.
+                  cacheHeight: 260,
                   fit: BoxFit.contain,
                   filterQuality: FilterQuality.high,
                 ),
@@ -142,10 +145,10 @@ class _SplashCatalogPageState extends State<SplashCatalogPage> {
                         child: Container(
                           decoration: BoxDecoration(
                             borderRadius: BorderRadius.circular(26),
-                            gradient: const LinearGradient(
-                              colors: [Color(0xFF241B14), Color(0xFF17110D)],
+                            gradient: theme.colorScheme.cardGradient,
+                            border: Border.all(
+                              color: theme.colorScheme.outlineVariant,
                             ),
-                            border: Border.all(color: Colors.white12),
                             boxShadow: const [
                               BoxShadow(
                                 color: Color(0x66000000),

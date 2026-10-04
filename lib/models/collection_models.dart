@@ -124,6 +124,7 @@ class Track {
     required this.artist,
     required this.filePath,
     this.artworkPath,
+    this.duration,
   });
 
   final String id;
@@ -134,20 +135,34 @@ class Track {
   /// Cover art extracted from the audio file's tags, stored in app storage.
   final String? artworkPath;
 
-  Track copyWith({String? title, String? artist, String? artworkPath}) {
+  /// Length from the file's tags or from playback; null until known.
+  final Duration? duration;
+
+  /// Whether there is an audio file to play (starter entries have none).
+  bool get hasFile => filePath.trim().isNotEmpty;
+
+  Track copyWith({
+    String? title,
+    String? artist,
+    String? filePath,
+    String? artworkPath,
+    Duration? duration,
+  }) {
     return Track(
       id: id,
       title: title ?? this.title,
       artist: artist ?? this.artist,
-      filePath: filePath,
+      filePath: filePath ?? this.filePath,
       artworkPath: artworkPath ?? this.artworkPath,
+      duration: duration ?? this.duration,
     );
   }
 
   bool hasSameInfoAs(Track other) {
     return title == other.title &&
         artist == other.artist &&
-        artworkPath == other.artworkPath;
+        artworkPath == other.artworkPath &&
+        duration == other.duration;
   }
 
   Map<String, dynamic> toJson() {
@@ -157,6 +172,7 @@ class Track {
       'artist': artist,
       'filePath': _sanitizePersistedFilePath(filePath),
       if (artworkPath != null) 'artworkPath': artworkPath,
+      if (duration != null) 'durationMs': duration!.inMilliseconds,
     };
   }
 
@@ -170,7 +186,15 @@ class Track {
       artworkPath: CollectionEntry._sanitizePersistedPath(
         json['artworkPath']?.toString(),
       ),
+      duration: _parseDuration(json['durationMs']),
     );
+  }
+
+  static Duration? _parseDuration(Object? raw) {
+    if (raw is! num || raw <= 0) {
+      return null;
+    }
+    return Duration(milliseconds: raw.toInt());
   }
 
   static String _sanitizePersistedFilePath(String rawPath) {

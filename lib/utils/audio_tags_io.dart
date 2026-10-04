@@ -41,11 +41,15 @@ AudioTags? _readAudioTagsSync(String filePath) {
     coverBytes: cover?.bytes,
     coverMimeType: cover?.mimetype,
     lyrics: metadata.lyrics?.trim().isEmpty ?? true ? null : metadata.lyrics,
+    duration: metadata.duration == null || metadata.duration! <= Duration.zero
+        ? null
+        : metadata.duration,
   );
   if (tags.title == null &&
       tags.artist == null &&
       !tags.hasCover &&
-      tags.lyrics == null) {
+      tags.lyrics == null &&
+      tags.duration == null) {
     return null;
   }
   return tags;

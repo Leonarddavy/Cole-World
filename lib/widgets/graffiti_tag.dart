@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../theme/graffiti_surfaces.dart';
+
 class GraffitiTag extends StatelessWidget {
   const GraffitiTag({
     super.key,
@@ -21,12 +23,10 @@ class GraffitiTag extends StatelessWidget {
     final resolvedBorder = borderColor ?? Colors.white24;
     final resolvedText = textColor ?? Theme.of(context).colorScheme.onSurface;
     final decoration = fillColor == null
-        ? const BoxDecoration(
-            gradient: LinearGradient(
-              colors: [Color(0xFF2A2117), Color(0xFF16110C)],
-            ),
-            borderRadius: BorderRadius.all(Radius.circular(16)),
-            boxShadow: [
+        ? BoxDecoration(
+            gradient: Theme.of(context).colorScheme.raisedGradient,
+            borderRadius: const BorderRadius.all(Radius.circular(16)),
+            boxShadow: const [
               BoxShadow(
                 color: Color(0x66000000),
                 blurRadius: 8,

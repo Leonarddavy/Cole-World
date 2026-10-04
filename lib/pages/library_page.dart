@@ -1,12 +1,26 @@
+import 'dart:math';
+
 import 'package:flutter/material.dart';
 
 import '../models/collection_models.dart';
 import '../models/entry_menu_action.dart';
+import '../theme/graffiti_surfaces.dart';
 import '../ui/collection_type_ui.dart';
+import '../ui/formatting.dart';
 import '../widgets/artwork_card.dart';
 import '../widgets/graffiti_tag.dart';
 import '../widgets/track_queue_menu_button.dart';
 
+/// A song shortcut with the collection it was played from.
+class RecentTrackShortcut {
+  const RecentTrackShortcut({required this.entry, required this.track});
+
+  final CollectionEntry entry;
+  final Track track;
+}
+
+/// One collection type (albums, singles, …): Play/Shuffle, recently played,
+/// and a grid of square covers.
 class LibraryPage extends StatelessWidget {
   const LibraryPage({
     super.key,
@@ -17,6 +31,7 @@ class LibraryPage extends StatelessWidget {
     required this.onPlayRecentTrack,
     this.onPlayNext,
     this.onAddToQueue,
+    this.onAddToPlaylist,
     required this.onCreateCollection,
     required this.onUploadToCollection,
     this.onPlayAll,
@@ -32,6 +47,8 @@ class LibraryPage extends StatelessWidget {
   onPlayRecentTrack;
   final Future<void> Function(Track track, CollectionEntry entry)? onPlayNext;
   final Future<void> Function(Track track, CollectionEntry entry)? onAddToQueue;
+  final Future<void> Function(Track track, CollectionEntry entry)?
+  onAddToPlaylist;
   final VoidCallback onCreateCollection;
   final VoidCallback onUploadToCollection;
   final VoidCallback? onPlayAll;
@@ -39,59 +56,91 @@ class LibraryPage extends StatelessWidget {
   final void Function(CollectionEntry entry, EntryMenuAction action)?
   onMenuAction;
 
+  void _showAddSheet(BuildContext context) {
+    final label = tabType.label.toLowerCase();
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) {
+        void choose(VoidCallback action) {
+          Navigator.pop(sheetContext);
+          action();
+        }
+
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.library_add),
+                title: Text('New $label'),
+                subtitle: Text('Name it, add a cover and songs'),
+                onTap: () => choose(onCreateCollection),
+              ),
+              ListTile(
+                leading: const Icon(Icons.upload_file),
+                title: Text('Upload songs to a $label'),
+                subtitle: const Text('Pick audio files or a whole folder'),
+                onTap: () => choose(onUploadToCollection),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final label = tabType.label;
+    final stored = entries.where((entry) => !entry.isSmart);
+    final songTotal = stored.fold<int>(
+      0,
+      (sum, entry) => sum + entry.tracks.length,
+    );
+    final summary = entries.isEmpty
+        ? 'Nothing here yet'
+        : '${stored.length} ${label.toLowerCase()}${stored.length == 1 ? '' : 's'}'
+              ' · ${songCount(songTotal)}';
+
     return CustomScrollView(
       slivers: [
         SliverPadding(
-          padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-          sliver: SliverToBoxAdapter(
-            child: Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                FilledButton.icon(
-                  onPressed: onCreateCollection,
-                  icon: const Icon(Icons.library_add),
-                  label: Text('Add ${tabType.label}'),
-                ),
-                FilledButton.tonalIcon(
-                  onPressed: onUploadToCollection,
-                  icon: const Icon(Icons.upload_file),
-                  label: Text('Upload To ${tabType.label}'),
-                ),
-                if (onPlayAll != null)
-                  FilledButton.tonalIcon(
-                    onPressed: onPlayAll,
-                    icon: const Icon(Icons.play_arrow),
-                    label: const Text('Play All'),
-                  ),
-                if (onShufflePlay != null)
-                  FilledButton.tonalIcon(
-                    onPressed: onShufflePlay,
-                    icon: const Icon(Icons.shuffle),
-                    label: const Text('Shuffle'),
-                  ),
-              ],
-            ),
-          ),
-        ),
-        SliverPadding(
-          padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
           sliver: SliverToBoxAdapter(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                GraffitiTag(label: '${tabType.label} Vault'),
-                const SizedBox(height: 12),
-                Text(
-                  '${tabType.label}s',
-                  style: Theme.of(context).textTheme.headlineMedium,
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  'Curate, upload, and hit play on every drop.',
-                  style: Theme.of(context).textTheme.bodySmall,
+                GraffitiTag(label: '$label Vault'),
+                const SizedBox(height: 10),
+                Text('${label}s', style: theme.textTheme.headlineMedium),
+                const SizedBox(height: 2),
+                Text(summary, style: theme.textTheme.bodySmall),
+                const SizedBox(height: 14),
+                Row(
+                  children: [
+                    if (onPlayAll != null)
+                      FilledButton.icon(
+                        onPressed: onPlayAll,
+                        icon: const Icon(Icons.play_arrow_rounded),
+                        label: const Text('Play'),
+                      ),
+                    if (onPlayAll != null && onShufflePlay != null)
+                      const SizedBox(width: 8),
+                    if (onShufflePlay != null)
+                      FilledButton.tonalIcon(
+                        onPressed: onShufflePlay,
+                        icon: const Icon(Icons.shuffle_rounded),
+                        label: const Text('Shuffle'),
+                      ),
+                    const Spacer(),
+                    IconButton.filledTonal(
+                      tooltip: 'Add or upload',
+                      onPressed: () => _showAddSheet(context),
+                      icon: const Icon(Icons.add_rounded),
+                    ),
+                  ],
                 ),
               ],
             ),
@@ -99,60 +148,63 @@ class LibraryPage extends StatelessWidget {
         ),
         if (recentTracks.isNotEmpty)
           SliverPadding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
             sliver: SliverToBoxAdapter(
               child: _RecentlyPlayedRail(
                 recentTracks: recentTracks,
                 onPlayTrack: onPlayRecentTrack,
                 onPlayNext: onPlayNext,
                 onAddToQueue: onAddToQueue,
+                onAddToPlaylist: onAddToPlaylist,
               ),
             ),
           ),
         if (entries.isEmpty)
-          const SliverToBoxAdapter(
-            child: Padding(
-              padding: EdgeInsets.symmetric(vertical: 30),
-              child: Center(child: Text('No entries yet. Add one to start.')),
-            ),
+          SliverToBoxAdapter(
+            child: _EmptyLibrary(label: label, onCreate: onCreateCollection),
           )
         else
           SliverPadding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
-            sliver: SliverGrid(
-              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: 2,
-                mainAxisSpacing: 12,
-                crossAxisSpacing: 12,
-                childAspectRatio: 0.58,
-              ),
-              delegate: SliverChildBuilderDelegate((context, index) {
-                final entry = entries[index];
-                return _PortraitCollectionCard(
-                  entry: entry,
-                  onOpen: () => onOpen(entry),
-                  onMenuAction: onMenuAction == null || entry.isSmart
-                      ? null
-                      : (action) => onMenuAction!(entry, action),
+            sliver: SliverLayoutBuilder(
+              builder: (context, constraints) {
+                const spacing = 12.0;
+                final width = constraints.crossAxisExtent;
+                // Two columns on phones, more as the screen widens.
+                final columns = max(2, (width / 190).floor());
+                final tileWidth = (width - spacing * (columns - 1)) / columns;
+                final textScaler = MediaQuery.textScalerOf(context);
+                final captionHeight =
+                    10 + textScaler.scale(22) + 2 + textScaler.scale(16) + 6;
+                return SliverGrid(
+                  gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: columns,
+                    mainAxisSpacing: 14,
+                    crossAxisSpacing: spacing,
+                    mainAxisExtent: tileWidth + captionHeight,
+                  ),
+                  delegate: SliverChildBuilderDelegate((context, index) {
+                    final entry = entries[index];
+                    return _CollectionCard(
+                      entry: entry,
+                      onOpen: () => onOpen(entry),
+                      onMenuAction: onMenuAction == null || entry.isSmart
+                          ? null
+                          : (action) => onMenuAction!(entry, action),
+                    );
+                  }, childCount: entries.length),
                 );
-              }, childCount: entries.length),
+              },
             ),
           ),
-        const SliverToBoxAdapter(child: SizedBox(height: 120)),
+        const SliverToBoxAdapter(child: SizedBox(height: 32)),
       ],
     );
   }
 }
 
-class RecentTrackShortcut {
-  const RecentTrackShortcut({required this.entry, required this.track});
-
-  final CollectionEntry entry;
-  final Track track;
-}
-
-class _PortraitCollectionCard extends StatelessWidget {
-  const _PortraitCollectionCard({
+class _CollectionCard extends StatelessWidget {
+  const _CollectionCard({
     required this.entry,
     required this.onOpen,
     required this.onMenuAction,
@@ -164,110 +216,152 @@ class _PortraitCollectionCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onOpen,
-      borderRadius: BorderRadius.circular(18),
-      child: Container(
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(18),
-          gradient: const LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [Color(0xFF1F1812), Color(0xFF15100C)],
-          ),
-          border: Border.all(color: Colors.white12),
-          boxShadow: const [
-            BoxShadow(
-              color: Color(0x55000000),
-              blurRadius: 12,
-              offset: Offset(0, 8),
-            ),
-          ],
-        ),
+    final theme = Theme.of(context);
+    final featured = entry.featuredArtists
+        .where((name) => !name.toLowerCase().startsWith('no official'))
+        .toList();
+    final subtitle = entry.isSmart
+        ? 'Auto playlist · ${songCount(entry.tracks.length)}'
+        : featured.isNotEmpty
+        ? featured.join(', ')
+        : songCount(entry.tracks.length);
+
+    return Semantics(
+      button: true,
+      label: '${entry.title}, ${entry.type.label}, $subtitle',
+      excludeSemantics: onMenuAction == null,
+      child: InkWell(
+        onTap: onOpen,
+        borderRadius: BorderRadius.circular(14),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Expanded(
+            AspectRatio(
+              aspectRatio: 1,
               child: Stack(
+                fit: StackFit.expand,
                 children: [
-                  Positioned.fill(
-                    child: ArtworkCard(
-                      entry: entry,
-                      borderRadius: const BorderRadius.vertical(
-                        top: Radius.circular(18),
-                      ),
-                      heroTag: 'cover_${entry.id}',
-                    ),
+                  ArtworkCard(
+                    entry: entry,
+                    borderRadius: BorderRadius.circular(14),
+                    heroTag: 'cover_${entry.id}',
                   ),
                   if (onMenuAction != null)
                     Positioned(
-                      right: 8,
-                      top: 8,
-                      child: PopupMenuButton<EntryMenuAction>(
-                        tooltip: 'Collection actions',
-                        icon: const Icon(Icons.menu_rounded),
-                        color: const Color(0xFF251D15),
-                        onSelected: onMenuAction,
-                        itemBuilder: (context) {
-                          final items = <PopupMenuEntry<EntryMenuAction>>[
-                            const PopupMenuItem(
-                              value: EntryMenuAction.open,
-                              child: Text('Open'),
-                            ),
-                          ];
-                          if (entry.type.supportsMenuEdit) {
-                            items.addAll(const [
-                              PopupMenuItem(
-                                value: EntryMenuAction.uploadSongs,
-                                child: Text('Upload Songs'),
-                              ),
-                              PopupMenuItem(
-                                value: EntryMenuAction.editThumbnail,
-                                child: Text('Edit Thumbnail'),
-                              ),
-                              PopupMenuDivider(),
-                            ]);
-                          } else {
-                            items.add(const PopupMenuDivider());
-                          }
-                          items.add(
-                            const PopupMenuItem(
-                              value: EntryMenuAction.deleteCollection,
-                              child: Text('Delete'),
-                            ),
-                          );
-                          return items;
-                        },
+                      top: 4,
+                      right: 4,
+                      child: _CardMenuButton(
+                        entry: entry,
+                        onSelected: onMenuAction!,
                       ),
                     ),
                 ],
               ),
             ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(10, 10, 10, 12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    entry.title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontWeight: FontWeight.w700),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    entry.featuredArtists.isEmpty
-                        ? entry.type.label
-                        : entry.featuredArtists.join(', '),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
-                ],
+            const SizedBox(height: 10),
+            Text(
+              entry.title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.bodyLarge?.copyWith(
+                fontWeight: FontWeight.w700,
+                height: 1.35,
               ),
+            ),
+            const SizedBox(height: 2),
+            Text(
+              subtitle,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.bodySmall,
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _CardMenuButton extends StatelessWidget {
+  const _CardMenuButton({required this.entry, required this.onSelected});
+
+  final CollectionEntry entry;
+  final ValueChanged<EntryMenuAction> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.black.withValues(alpha: 0.55),
+      shape: const CircleBorder(),
+      child: PopupMenuButton<EntryMenuAction>(
+        tooltip: '${entry.type.label} options',
+        icon: const Icon(Icons.more_vert, size: 20, color: Colors.white),
+        padding: EdgeInsets.zero,
+        onSelected: onSelected,
+        itemBuilder: (context) => [
+          const PopupMenuItem(value: EntryMenuAction.open, child: Text('Open')),
+          if (entry.type == CollectionType.playlist)
+            const PopupMenuItem(
+              value: EntryMenuAction.addFromLibrary,
+              child: Text('Add Songs From Library'),
+            ),
+          if (entry.type.supportsMenuEdit) ...const [
+            PopupMenuItem(
+              value: EntryMenuAction.uploadSongs,
+              child: Text('Upload Songs'),
+            ),
+            PopupMenuItem(
+              value: EntryMenuAction.editThumbnail,
+              child: Text('Edit Thumbnail'),
+            ),
+          ],
+          const PopupMenuDivider(),
+          const PopupMenuItem(
+            value: EntryMenuAction.deleteCollection,
+            child: Text('Delete'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _EmptyLibrary extends StatelessWidget {
+  const _EmptyLibrary({required this.label, required this.onCreate});
+
+  final String label;
+  final VoidCallback onCreate;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(32, 32, 32, 16),
+      child: Column(
+        children: [
+          Icon(
+            Icons.library_music_outlined,
+            size: 48,
+            color: theme.colorScheme.onSurfaceVariant,
+          ),
+          const SizedBox(height: 12),
+          Text(
+            'No ${label.toLowerCase()}s yet',
+            style: theme.textTheme.titleMedium,
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'Create one and add songs from your device.',
+            textAlign: TextAlign.center,
+            style: theme.textTheme.bodySmall,
+          ),
+          const SizedBox(height: 14),
+          FilledButton.icon(
+            onPressed: onCreate,
+            icon: const Icon(Icons.library_add),
+            label: Text('New ${label.toLowerCase()}'),
+          ),
+        ],
       ),
     );
   }
@@ -279,56 +373,62 @@ class _RecentlyPlayedRail extends StatelessWidget {
     required this.onPlayTrack,
     this.onPlayNext,
     this.onAddToQueue,
+    this.onAddToPlaylist,
   });
 
   final List<RecentTrackShortcut> recentTracks;
   final Future<void> Function(Track track, CollectionEntry entry) onPlayTrack;
   final Future<void> Function(Track track, CollectionEntry entry)? onPlayNext;
   final Future<void> Function(Track track, CollectionEntry entry)? onAddToQueue;
+  final Future<void> Function(Track track, CollectionEntry entry)?
+  onAddToPlaylist;
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    // Grows with the user's text size instead of clipping.
+    final railHeight = max(
+      72.0,
+      24 + MediaQuery.textScalerOf(context).scale(44),
+    );
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Row(
-          children: [
-            const GraffitiTag(label: 'Recently Played'),
-            const Spacer(),
-            Text(
-              '${recentTracks.length} track(s)',
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
-          ],
-        ),
+        Text('Recently played', style: theme.textTheme.titleMedium),
         const SizedBox(height: 10),
         SizedBox(
-          height: 108,
+          height: railHeight,
           child: ListView.separated(
             scrollDirection: Axis.horizontal,
             itemCount: recentTracks.length,
-            separatorBuilder: (_, index) => const SizedBox(width: 10),
+            separatorBuilder: (_, _) => const SizedBox(width: 10),
             itemBuilder: (context, index) {
               final item = recentTracks[index];
               return SizedBox(
-                width: 270,
+                width: 260,
                 child: Material(
                   color: Colors.transparent,
                   child: InkWell(
-                    borderRadius: BorderRadius.circular(16),
+                    borderRadius: BorderRadius.circular(14),
                     onTap: () => onPlayTrack(item.track, item.entry),
-                    child: Container(
+                    child: Ink(
                       decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(16),
-                        gradient: const LinearGradient(
-                          colors: [Color(0xFF201812), Color(0xFF17110D)],
-                        ),
-                        border: Border.all(color: Colors.white12),
+                        borderRadius: BorderRadius.circular(14),
+                        gradient: scheme.cardGradient,
+                        border: Border.all(color: scheme.outlineVariant),
                       ),
-                      padding: const EdgeInsets.fromLTRB(12, 10, 10, 10),
                       child: Row(
                         children: [
-                          const Icon(Icons.history, size: 20),
+                          const SizedBox(width: 8),
+                          SizedBox.square(
+                            dimension: 48,
+                            child: ArtworkCard(
+                              entry: item.entry,
+                              imagePath: item.track.artworkPath,
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                          ),
                           const SizedBox(width: 10),
                           Expanded(
                             child: Column(
@@ -339,29 +439,36 @@ class _RecentlyPlayedRail extends StatelessWidget {
                                   item.track.title,
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
+                                  style: theme.textTheme.bodyMedium?.copyWith(
+                                    fontWeight: FontWeight.w700,
+                                  ),
                                 ),
                                 Text(
-                                  '${item.entry.title} • ${item.entry.type.label}',
+                                  item.entry.title,
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
-                                  style: Theme.of(context).textTheme.bodySmall,
+                                  style: theme.textTheme.bodySmall,
                                 ),
                               ],
                             ),
                           ),
-                          IconButton(
-                            tooltip: 'Play',
-                            onPressed: () =>
-                                onPlayTrack(item.track, item.entry),
-                            icon: const Icon(Icons.play_arrow),
-                          ),
                           if (onPlayNext != null && onAddToQueue != null)
                             TrackQueueMenuButton(
+                              track: item.track,
+                              subtitle: item.entry.title,
                               onPlayNext: () =>
                                   onPlayNext!(item.track, item.entry),
                               onAddToQueue: () =>
                                   onAddToQueue!(item.track, item.entry),
-                            ),
+                              onAddToPlaylist: onAddToPlaylist == null
+                                  ? null
+                                  : () => onAddToPlaylist!(
+                                      item.track,
+                                      item.entry,
+                                    ),
+                            )
+                          else
+                            const SizedBox(width: 8),
                         ],
                       ),
                     ),

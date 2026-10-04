@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../models/story_content.dart';
+import '../theme/graffiti_surfaces.dart';
 import '../widgets/graffiti_tag.dart';
 
 class ArtistHistoryPage extends StatelessWidget {
@@ -58,16 +59,15 @@ class _StoryImageCard extends StatelessWidget {
   final EdgeInsetsGeometry padding;
   final BorderRadius borderRadius;
 
-  Widget _background() {
+  Widget _background(BuildContext context) {
     final source = imageSource?.trim() ?? '';
+    final placeholder = DecoratedBox(
+      decoration: BoxDecoration(
+        gradient: Theme.of(context).colorScheme.raisedGradient,
+      ),
+    );
     if (source.isEmpty) {
-      return const DecoratedBox(
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            colors: [Color(0xFF322416), Color(0xFF1D1712)],
-          ),
-        ),
-      );
+      return placeholder;
     }
     if (source.startsWith('assets/')) {
       return Image.asset(
@@ -86,15 +86,7 @@ class _StoryImageCard extends StatelessWidget {
       width: double.infinity,
       height: double.infinity,
       filterQuality: FilterQuality.high,
-      errorBuilder: (_, _, _) {
-        return const DecoratedBox(
-          decoration: BoxDecoration(
-            gradient: LinearGradient(
-              colors: [Color(0xFF322416), Color(0xFF1D1712)],
-            ),
-          ),
-        );
-      },
+      errorBuilder: (_, _, _) => placeholder,
     );
   }
 
@@ -118,7 +110,7 @@ class _StoryImageCard extends StatelessWidget {
         child: Stack(
           fit: StackFit.passthrough,
           children: [
-            Positioned.fill(child: _background()),
+            Positioned.fill(child: _background(context)),
             const Positioned.fill(
               child: DecoratedBox(
                 decoration: BoxDecoration(
@@ -188,8 +180,8 @@ class _SectionBlock extends StatelessWidget {
             children: [
               CircleAvatar(
                 radius: 12,
-                backgroundColor: const Color(0xFFFFB547),
-                foregroundColor: const Color(0xFF2D1B07),
+                backgroundColor: Theme.of(context).colorScheme.primary,
+                foregroundColor: Theme.of(context).colorScheme.onPrimary,
                 child: Text(section.indexLabel),
               ),
               const SizedBox(width: 10),
@@ -257,8 +249,12 @@ class _ChronologicalTimeline extends StatelessWidget {
               contentPadding: EdgeInsets.zero,
               leading: CircleAvatar(
                 radius: 14,
-                backgroundColor: const Color(0xFFB98945),
-                foregroundColor: const Color(0xFF2D1B07),
+                backgroundColor: Color.lerp(
+                  Theme.of(context).colorScheme.primary,
+                  Colors.black,
+                  0.25,
+                ),
+                foregroundColor: Theme.of(context).colorScheme.onPrimary,
                 child: Text(
                   event.year,
                   style: const TextStyle(

@@ -14,8 +14,15 @@ class AppThemeSettings {
     this.secondaryColorValue = 0xFF2EE6D6,
     this.backgroundColorValue = 0xFF0C0B0A,
     this.displayFontKey = 'rubik_wet_paint',
-    this.bodyFontKey = 'permanent_marker',
+    this.bodyFontKey = defaultBodyFontKey,
   });
+
+  /// Graffiti fonts suit headings; long lists and lyrics need a font that
+  /// stays readable at small sizes.
+  static const String defaultBodyFontKey = 'nunito_sans';
+
+  /// Bumped when defaults change in a way saved settings should pick up.
+  static const int currentVersion = 2;
 
   final int primaryColorValue;
   final int secondaryColorValue;
@@ -84,7 +91,7 @@ class AppThemeSettings {
       displayFontKey: (json['displayFontKey'] ?? 'rubik_wet_paint')
           .toString()
           .trim(),
-      bodyFontKey: (json['bodyFontKey'] ?? 'permanent_marker')
+      bodyFontKey: (json['bodyFontKey'] ?? defaultBodyFontKey)
           .toString()
           .trim(),
     );
@@ -137,6 +144,13 @@ class AppTheme {
         ThemeData.estimateBrightnessForColor(secondary) == Brightness.dark
         ? Colors.white
         : const Color(0xFF071C1A);
+
+    // Layered surfaces lifted from the chosen background and warmed by the
+    // accent color, so the color editor restyles every card and tile.
+    Color layer(double lift, double tint) => Color.alphaBlend(
+      primary.withValues(alpha: tint),
+      _shiftLightness(background, lift),
+    );
 
     TextStyle displayStyle(double size, {Color? color}) {
       return _displayStyle(
@@ -204,7 +218,15 @@ class AppTheme {
         onPrimary: onPrimary,
         onSecondary: onSecondary,
         onSurface: foreground,
+        onSurfaceVariant: const Color(0xFFCEC7BC),
         surfaceTint: Colors.transparent,
+        surfaceContainerLowest: background,
+        surfaceContainerLow: layer(0.03, 0.04),
+        surfaceContainer: layer(0.05, 0.06),
+        surfaceContainerHigh: layer(0.075, 0.07),
+        surfaceContainerHighest: layer(0.11, 0.08),
+        outline: Colors.white24,
+        outlineVariant: Colors.white12,
       ),
       textTheme: textTheme,
       appBarTheme: AppBarTheme(

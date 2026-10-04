@@ -1,12 +1,18 @@
-import 'dart:math';
-
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
+import 'package:flutter/services.dart';
 
 import '../models/collection_models.dart';
+import '../theme/graffiti_surfaces.dart';
 import 'artwork_card.dart';
 import 'now_playing_equalizer.dart';
 
+/// Shared with Now Playing so the cover flies between the two.
+const String nowPlayingCoverHeroTag = 'now_playing_cover';
+
+/// A slim player pinned above the navigation: cover, song, like, play/pause
+/// and a thin progress line. Tap to open Now Playing; swipe sideways to skip.
 class MiniPlayerBar extends StatelessWidget {
   const MiniPlayerBar({
     super.key,
@@ -18,16 +24,11 @@ class MiniPlayerBar extends StatelessWidget {
     required this.durationListenable,
     required this.positionListenable,
     required this.onToggle,
-    required this.onSeek,
     required this.onPrevious,
     required this.onNext,
-    required this.onToggleShuffle,
-    required this.shuffleEnabled,
     required this.isLiked,
     required this.onToggleLike,
     this.onOpenNowPlaying,
-    this.isExpanded = true,
-    this.onToggleSize,
   });
 
   final Track track;
@@ -38,274 +39,207 @@ class MiniPlayerBar extends StatelessWidget {
   final ValueListenable<Duration> durationListenable;
   final ValueListenable<Duration> positionListenable;
   final VoidCallback onToggle;
-  final Future<void> Function(Duration position) onSeek;
   final Future<void> Function() onPrevious;
   final Future<void> Function() onNext;
-  final VoidCallback onToggleShuffle;
-  final bool shuffleEnabled;
   final bool isLiked;
   final VoidCallback onToggleLike;
   final VoidCallback? onOpenNowPlaying;
-  final bool isExpanded;
-  final VoidCallback? onToggleSize;
+
+  /// A flick faster than this (logical px/s) skips a song.
+  static const double _skipVelocity = 300;
+
+  void _onHorizontalDragEnd(DragEndDetails details) {
+    final velocity = details.primaryVelocity ?? 0;
+    if (velocity.abs() < _skipVelocity) {
+      return;
+    }
+    HapticFeedback.selectionClick();
+    if (velocity < 0) {
+      onNext();
+    } else {
+      onPrevious();
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
     final busy = isLoading || isBuffering;
+    final reduceMotion = MediaQuery.disableAnimationsOf(context);
 
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+      child: Semantics(
+        container: true,
+        button: true,
+        label: 'Now playing: ${track.title}, ${track.artist}',
+        hint: 'Opens the player',
+        customSemanticsActions: {
+          const CustomSemanticsAction(label: 'Next song'): () => onNext(),
+          const CustomSemanticsAction(label: 'Previous song'): () =>
+              onPrevious(),
+        },
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: onOpenNowPlaying,
+          onHorizontalDragEnd: _onHorizontalDragEnd,
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(16),
+              gradient: scheme.raisedGradient,
+              border: Border.all(color: scheme.outlineVariant),
+              boxShadow: const [
+                BoxShadow(
+                  color: Color(0x66000000),
+                  blurRadius: 14,
+                  offset: Offset(0, 6),
+                ),
+              ],
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(16),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(8, 8, 4, 6),
+                    child: Row(
+                      children: [
+                        SizedBox.square(
+                          dimension: 44,
+                          child: entry == null
+                              ? Center(
+                                  child: NowPlayingEqualizer(
+                                    isActive: isPlaying && !busy,
+                                  ),
+                                )
+                              : ArtworkCard(
+                                  entry: entry!,
+                                  imagePath: track.artworkPath,
+                                  borderRadius: BorderRadius.circular(10),
+                                  heroTag: nowPlayingCoverHeroTag,
+                                ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: AnimatedSwitcher(
+                            duration: reduceMotion
+                                ? Duration.zero
+                                : const Duration(milliseconds: 220),
+                            child: ExcludeSemantics(
+                              key: ValueKey(track.id),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Text(
+                                    track.title,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: theme.textTheme.bodyLarge?.copyWith(
+                                      fontWeight: FontWeight.w700,
+                                      height: 1.2,
+                                    ),
+                                  ),
+                                  Text(
+                                    track.artist,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: theme.textTheme.bodySmall,
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                        IconButton(
+                          tooltip: isLiked
+                              ? 'Remove from Liked Songs'
+                              : 'Add to Liked Songs',
+                          color: isLiked
+                              ? scheme.primary
+                              : scheme.onSurfaceVariant,
+                          onPressed: () {
+                            HapticFeedback.selectionClick();
+                            onToggleLike();
+                          },
+                          icon: Icon(
+                            isLiked ? Icons.favorite : Icons.favorite_border,
+                          ),
+                        ),
+                        IconButton(
+                          tooltip: isPlaying ? 'Pause' : 'Play',
+                          onPressed: isLoading
+                              ? null
+                              : () {
+                                  HapticFeedback.lightImpact();
+                                  onToggle();
+                                },
+                          icon: busy
+                              ? const SizedBox.square(
+                                  dimension: 24,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2.4,
+                                  ),
+                                )
+                              : Icon(
+                                  isPlaying
+                                      ? Icons.pause_rounded
+                                      : Icons.play_arrow_rounded,
+                                  size: 32,
+                                ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  _ProgressLine(
+                    durationListenable: durationListenable,
+                    positionListenable: positionListenable,
+                    color: scheme.primary,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ProgressLine extends StatelessWidget {
+  const _ProgressLine({
+    required this.durationListenable,
+    required this.positionListenable,
+    required this.color,
+  });
+
+  final ValueListenable<Duration> durationListenable;
+  final ValueListenable<Duration> positionListenable;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
     return ValueListenableBuilder<Duration>(
       valueListenable: durationListenable,
       builder: (context, duration, _) {
         return ValueListenableBuilder<Duration>(
           valueListenable: positionListenable,
           builder: (context, position, _) {
-            final maxMillis = duration.inMilliseconds <= 0
-                ? 1
-                : duration.inMilliseconds;
-            final clampedMillis = min(
-              position.inMilliseconds,
-              maxMillis,
-            ).toDouble();
-            final progress = duration.inMilliseconds <= 0
+            final total = duration.inMilliseconds;
+            final progress = total <= 0
                 ? 0.0
-                : position.inMilliseconds / duration.inMilliseconds;
-
-            return AnimatedSize(
-              duration: const Duration(milliseconds: 240),
-              curve: Curves.easeOutCubic,
-              child: Container(
-                margin: const EdgeInsets.fromLTRB(14, 0, 14, 10),
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 10,
-                ),
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(16),
-                  gradient: const LinearGradient(
-                    colors: [Color(0xFF1F1812), Color(0xFF17110D)],
-                  ),
-                  border: Border.all(color: Colors.white12),
-                  boxShadow: const [
-                    BoxShadow(
-                      color: Color(0x55000000),
-                      blurRadius: 12,
-                      offset: Offset(0, 8),
-                    ),
-                  ],
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Row(
-                      children: [
-                        if (entry != null)
-                          SizedBox(
-                            width: 48,
-                            height: 48,
-                            child: ArtworkCard(
-                              entry: entry!,
-                              imagePath: track.artworkPath,
-                              borderRadius: BorderRadius.circular(12),
-                              heroTag: 'now_playing_${entry!.id}',
-                            ),
-                          )
-                        else
-                          AnimatedSwitcher(
-                            duration: const Duration(milliseconds: 180),
-                            child: isPlaying && !isLoading
-                                ? NowPlayingEqualizer(
-                                    key: const ValueKey('eq'),
-                                    isActive: !isBuffering,
-                                  )
-                                : const Icon(
-                                    Icons.graphic_eq,
-                                    key: ValueKey('eq_icon'),
-                                    size: 20,
-                                  ),
-                          ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: GestureDetector(
-                            behavior: HitTestBehavior.opaque,
-                            onTap: onOpenNowPlaying,
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Text(
-                                  track.title,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                                if (isExpanded)
-                                  Text(
-                                    track.artist,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: Theme.of(
-                                      context,
-                                    ).textTheme.bodySmall,
-                                  ),
-                              ],
-                            ),
-                          ),
-                        ),
-                        IconButton(
-                          tooltip: isExpanded ? 'Collapse' : 'Expand',
-                          onPressed: onToggleSize,
-                          icon: Icon(
-                            isExpanded ? Icons.expand_more : Icons.expand_less,
-                          ),
-                        ),
-                        IconButton(
-                          onPressed: isLoading ? null : onToggle,
-                          icon: AnimatedSwitcher(
-                            duration: const Duration(milliseconds: 180),
-                            child: busy
-                                ? const SizedBox(
-                                    key: ValueKey('busy'),
-                                    width: 26,
-                                    height: 26,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2.6,
-                                    ),
-                                  )
-                                : Icon(
-                                    isPlaying
-                                        ? Icons.pause_circle_filled
-                                        : Icons.play_circle_fill,
-                                    key: ValueKey(isPlaying ? 'pause' : 'play'),
-                                  ),
-                          ),
-                        ),
-                      ],
-                    ),
-                    if (isExpanded) ...[
-                      const SizedBox(height: 4),
-                      WaveformStrip(progress: progress.clamp(0.0, 1.0)),
-                      SliderTheme(
-                        data: SliderTheme.of(context).copyWith(
-                          activeTrackColor: const Color(0xFFFFB547),
-                          inactiveTrackColor: Colors.white24,
-                          thumbColor: const Color(0xFF2EE6D6),
-                          overlayColor: const Color(0x332EE6D6),
-                        ),
-                        child: Slider(
-                          min: 0,
-                          max: maxMillis.toDouble(),
-                          value: clampedMillis,
-                          onChanged: duration.inMilliseconds <= 0
-                              ? null
-                              : (value) => onSeek(
-                                  Duration(milliseconds: value.round()),
-                                ),
-                        ),
-                      ),
-                      Row(
-                        children: [
-                          Text(
-                            _formatDuration(position),
-                            style: Theme.of(context).textTheme.bodySmall,
-                          ),
-                          const Spacer(),
-                          IconButton(
-                            tooltip: isLiked
-                                ? 'Remove from Liked Songs'
-                                : 'Add to Liked Songs',
-                            color: isLiked
-                                ? const Color(0xFFFFB547)
-                                : Colors.white70,
-                            onPressed: onToggleLike,
-                            icon: Icon(
-                              isLiked ? Icons.favorite : Icons.favorite_border,
-                            ),
-                          ),
-                          IconButton(
-                            tooltip: 'Previous',
-                            onPressed: () => onPrevious(),
-                            icon: const Icon(Icons.skip_previous_rounded),
-                          ),
-                          IconButton(
-                            tooltip: 'Shuffle',
-                            color: shuffleEnabled
-                                ? const Color(0xFFFFB547)
-                                : Colors.white70,
-                            onPressed: onToggleShuffle,
-                            icon: const Icon(Icons.shuffle),
-                          ),
-                          IconButton(
-                            tooltip: 'Next',
-                            onPressed: () => onNext(),
-                            icon: const Icon(Icons.skip_next_rounded),
-                          ),
-                          Text(
-                            _formatDuration(duration),
-                            style: Theme.of(context).textTheme.bodySmall,
-                          ),
-                        ],
-                      ),
-                    ],
-                  ],
-                ),
-              ),
+                : (position.inMilliseconds / total).clamp(0.0, 1.0);
+            return LinearProgressIndicator(
+              value: progress,
+              minHeight: 2,
+              color: color,
+              backgroundColor: Colors.white12,
             );
           },
         );
       },
     );
   }
-}
-
-class WaveformStrip extends StatelessWidget {
-  const WaveformStrip({super.key, required this.progress});
-
-  final double progress;
-
-  @override
-  Widget build(BuildContext context) {
-    const barHeights = [
-      8.0,
-      14.0,
-      10.0,
-      18.0,
-      11.0,
-      16.0,
-      9.0,
-      15.0,
-      12.0,
-      19.0,
-      10.0,
-      14.0,
-    ];
-
-    return SizedBox(
-      height: 20,
-      child: Row(
-        children: [
-          for (int i = 0; i < barHeights.length; i++)
-            Expanded(
-              child: Container(
-                margin: const EdgeInsets.symmetric(horizontal: 1),
-                height: barHeights[i],
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(4),
-                  color: i / (barHeights.length - 1) <= progress
-                      ? const Color(0xFF2EE6D6)
-                      : Colors.white24,
-                ),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-String _formatDuration(Duration duration) {
-  if (duration == Duration.zero) {
-    return '0:00';
-  }
-  final minutes = duration.inMinutes;
-  final seconds = duration.inSeconds % 60;
-  return '$minutes:${seconds.toString().padLeft(2, '0')}';
 }

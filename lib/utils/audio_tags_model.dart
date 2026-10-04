@@ -8,6 +8,7 @@ class AudioTags {
     this.coverBytes,
     this.coverMimeType,
     this.lyrics,
+    this.duration,
   });
 
   final String? title;
@@ -17,6 +18,9 @@ class AudioTags {
 
   /// Embedded lyrics: plain text or LRC.
   final String? lyrics;
+
+  /// Playing time, when the container reports it.
+  final Duration? duration;
 
   bool get hasCover => coverBytes != null && coverBytes!.isNotEmpty;
 
