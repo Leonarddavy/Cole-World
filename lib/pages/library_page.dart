@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../models/collection_models.dart';
 import '../models/entry_menu_action.dart';
+import '../theme/card_shapes.dart';
 import '../theme/graffiti_surfaces.dart';
 import '../ui/collection_type_ui.dart';
 import '../ui/formatting.dart';
@@ -232,7 +233,7 @@ class _CollectionCard extends StatelessWidget {
       excludeSemantics: onMenuAction == null,
       child: InkWell(
         onTap: onOpen,
-        borderRadius: BorderRadius.circular(14),
+        customBorder: CardShapes.of(context).card(14),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -410,13 +411,15 @@ class _RecentlyPlayedRail extends StatelessWidget {
                 child: Material(
                   color: Colors.transparent,
                   child: InkWell(
-                    borderRadius: BorderRadius.circular(14),
+                    customBorder: CardShapes.of(context).card(14),
                     onTap: () => onPlayTrack(item.track, item.entry),
                     child: Ink(
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(14),
+                      decoration: ShapeDecoration(
+                        shape: CardShapes.of(context).card(
+                          14,
+                          side: BorderSide(color: scheme.outlineVariant),
+                        ),
                         gradient: scheme.cardGradient,
-                        border: Border.all(color: scheme.outlineVariant),
                       ),
                       child: Row(
                         children: [

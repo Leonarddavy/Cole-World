@@ -4,6 +4,7 @@ import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 
 import '../models/collection_models.dart';
+import '../theme/card_shapes.dart';
 import '../theme/graffiti_surfaces.dart';
 import 'artwork_card.dart';
 import 'now_playing_equalizer.dart';
@@ -67,6 +68,7 @@ class MiniPlayerBar extends StatelessWidget {
     final scheme = theme.colorScheme;
     final busy = isLoading || isBuffering;
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
+    final shape = CardShapes.of(context).card(16);
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
@@ -85,11 +87,12 @@ class MiniPlayerBar extends StatelessWidget {
           onTap: onOpenNowPlaying,
           onHorizontalDragEnd: _onHorizontalDragEnd,
           child: DecoratedBox(
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(16),
+            decoration: ShapeDecoration(
+              shape: shape.copyWith(
+                side: BorderSide(color: scheme.outlineVariant),
+              ),
               gradient: scheme.raisedGradient,
-              border: Border.all(color: scheme.outlineVariant),
-              boxShadow: const [
+              shadows: const [
                 BoxShadow(
                   color: Color(0x66000000),
                   blurRadius: 14,
@@ -97,8 +100,8 @@ class MiniPlayerBar extends StatelessWidget {
                 ),
               ],
             ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(16),
+            child: ClipPath(
+              clipper: ShapeBorderClipper(shape: shape),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../models/story_content.dart';
+import '../theme/card_shapes.dart';
 import '../theme/graffiti_surfaces.dart';
 import '../widgets/graffiti_tag.dart';
 
@@ -92,21 +93,18 @@ class _StoryImageCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      margin: margin,
-      decoration: BoxDecoration(
-        borderRadius: borderRadius,
-        border: Border.all(color: Colors.white10),
-        boxShadow: const [
+    return Padding(
+      padding: margin ?? EdgeInsets.zero,
+      child: ShapedBox(
+        shape: CardShapes.of(context).card(borderRadius.topLeft.x),
+        outline: const BorderSide(color: Colors.white10),
+        shadows: const [
           BoxShadow(
             color: Color(0x55000000),
             blurRadius: 12,
             offset: Offset(0, 8),
           ),
         ],
-      ),
-      child: ClipRRect(
-        borderRadius: borderRadius,
         child: Stack(
           fit: StackFit.passthrough,
           children: [

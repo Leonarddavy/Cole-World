@@ -14,9 +14,13 @@ extension type _JSStorage(JSObject _) implements JSObject {
 }
 
 class LibraryStorage {
-  const LibraryStorage();
+  /// [vault] names the artist whose library this is; J. Cole's keeps the
+  /// original key, so existing libraries load unchanged.
+  const LibraryStorage({this.vault = 'jcole'});
 
-  static const String _libraryStorageKey = 'jcole_library_json';
+  final String vault;
+
+  String get _libraryStorageKey => '${vault}_library_json';
 
   Future<List<CollectionEntry>?> load() async {
     try {

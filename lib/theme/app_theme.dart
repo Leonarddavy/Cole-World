@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
+import 'card_shapes.dart';
+
 class FontChoice {
   const FontChoice({required this.key, required this.label});
 
@@ -15,6 +17,7 @@ class AppThemeSettings {
     this.backgroundColorValue = 0xFF0C0B0A,
     this.displayFontKey = 'rubik_wet_paint',
     this.bodyFontKey = defaultBodyFontKey,
+    this.cardShapeKey = 'rounded',
   });
 
   /// Graffiti fonts suit headings; long lists and lyrics need a font that
@@ -30,6 +33,11 @@ class AppThemeSettings {
   final String displayFontKey;
   final String bodyFontKey;
 
+  /// A [CardShapeStyle] name.
+  final String cardShapeKey;
+
+  CardShapeStyle get cardShape => CardShapeStyleUi.fromKey(cardShapeKey);
+
   Color get primaryColor => Color(primaryColorValue);
   Color get secondaryColor => Color(secondaryColorValue);
   Color get backgroundColor => Color(backgroundColorValue);
@@ -40,6 +48,7 @@ class AppThemeSettings {
     int? backgroundColorValue,
     String? displayFontKey,
     String? bodyFontKey,
+    String? cardShapeKey,
   }) {
     return AppThemeSettings(
       primaryColorValue: primaryColorValue ?? this.primaryColorValue,
@@ -47,6 +56,7 @@ class AppThemeSettings {
       backgroundColorValue: backgroundColorValue ?? this.backgroundColorValue,
       displayFontKey: displayFontKey ?? this.displayFontKey,
       bodyFontKey: bodyFontKey ?? this.bodyFontKey,
+      cardShapeKey: cardShapeKey ?? this.cardShapeKey,
     );
   }
 
@@ -57,7 +67,8 @@ class AppThemeSettings {
         other.secondaryColorValue == secondaryColorValue &&
         other.backgroundColorValue == backgroundColorValue &&
         other.displayFontKey == displayFontKey &&
-        other.bodyFontKey == bodyFontKey;
+        other.bodyFontKey == bodyFontKey &&
+        other.cardShapeKey == cardShapeKey;
   }
 
   @override
@@ -67,6 +78,7 @@ class AppThemeSettings {
     backgroundColorValue,
     displayFontKey,
     bodyFontKey,
+    cardShapeKey,
   );
 
   Map<String, dynamic> toJson() {
@@ -76,6 +88,7 @@ class AppThemeSettings {
       'backgroundColorValue': backgroundColorValue,
       'displayFontKey': displayFontKey,
       'bodyFontKey': bodyFontKey,
+      'cardShapeKey': cardShapeKey,
     };
   }
 
@@ -94,6 +107,9 @@ class AppThemeSettings {
       bodyFontKey: (json['bodyFontKey'] ?? defaultBodyFontKey)
           .toString()
           .trim(),
+      cardShapeKey: CardShapeStyleUi.fromKey(
+        json['cardShapeKey']?.toString(),
+      ).name,
     );
   }
 
@@ -237,10 +253,11 @@ class AppTheme {
         centerTitle: false,
         titleTextStyle: displayStyle(26),
       ),
+      extensions: [CardShapes(settings.cardShape)],
       cardTheme: CardThemeData(
         color: surfaceAlt,
         elevation: 0,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        shape: CardShapes(settings.cardShape).card(20),
       ),
       snackBarTheme: SnackBarThemeData(
         behavior: SnackBarBehavior.floating,
@@ -343,6 +360,11 @@ class AppTheme {
         return GoogleFonts.permanentMarkerTextTheme(base);
     }
   }
+
+  /// The heading font for [fontKey], e.g. to preview an artist's lettering
+  /// outside their theme.
+  static TextStyle displayFont(String fontKey, {TextStyle? textStyle}) =>
+      _displayStyle(fontKey, textStyle: textStyle);
 
   static TextStyle _displayStyle(String fontKey, {TextStyle? textStyle}) {
     switch (fontKey) {

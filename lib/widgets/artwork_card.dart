@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../models/collection_models.dart';
+import '../theme/card_shapes.dart';
 import '../theme/graffiti_surfaces.dart';
 import '../ui/collection_type_ui.dart';
 import '../utils/local_image.dart';
@@ -71,6 +72,9 @@ class ArtworkCard extends StatelessWidget {
   });
 
   final CollectionEntry entry;
+
+  /// The corner radius in the default style; the chosen card shape
+  /// (Settings → Card shape) decides the actual outline.
   final BorderRadius borderRadius;
   final String? heroTag;
 
@@ -92,65 +96,56 @@ class ArtworkCard extends StatelessWidget {
       ),
     );
 
-    final child = DecoratedBox(
-      decoration: BoxDecoration(
-        borderRadius: borderRadius,
-        border: Border.all(color: scheme.outlineVariant),
-      ),
-      child: ClipRRect(
-        borderRadius: borderRadius,
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            if (provider == null)
-              placeholder
-            else
-              LayoutBuilder(
-                builder: (context, constraints) {
-                  // Decode at display size, not the cover's full resolution.
-                  final width = constraints.maxWidth;
-                  final cacheWidth = width.isFinite && width > 0
-                      ? (width * MediaQuery.devicePixelRatioOf(context)).round()
-                      : null;
-                  return Image(
-                    image: ResizeImage.resizeIfNeeded(
-                      cacheWidth,
-                      null,
-                      provider,
-                    ),
-                    fit: BoxFit.cover,
-                    gaplessPlayback: true,
-                    errorBuilder: (_, _, _) => placeholder,
-                  );
-                },
-              ),
-            if (showTypeBadge)
-              Positioned(
-                left: 8,
-                bottom: 8,
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    color: Colors.black.withValues(alpha: 0.6),
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(color: Colors.white24),
+    final child = ShapedBox(
+      shape: CardShapes.of(context).artwork(borderRadius.topLeft.x),
+      outline: BorderSide(color: scheme.outlineVariant),
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          if (provider == null)
+            placeholder
+          else
+            LayoutBuilder(
+              builder: (context, constraints) {
+                // Decode at display size, not the cover's full resolution.
+                final width = constraints.maxWidth;
+                final cacheWidth = width.isFinite && width > 0
+                    ? (width * MediaQuery.devicePixelRatioOf(context)).round()
+                    : null;
+                return Image(
+                  image: ResizeImage.resizeIfNeeded(cacheWidth, null, provider),
+                  fit: BoxFit.cover,
+                  gaplessPlayback: true,
+                  errorBuilder: (_, _, _) => placeholder,
+                );
+              },
+            ),
+          if (showTypeBadge)
+            Positioned(
+              left: 8,
+              bottom: 8,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.6),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: Colors.white24),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 4,
                   ),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 4,
-                    ),
-                    child: Text(
-                      entry.type.label.toUpperCase(),
-                      style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                        fontSize: 10,
-                        letterSpacing: 1.1,
-                      ),
+                  child: Text(
+                    entry.type.label.toUpperCase(),
+                    style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                      fontSize: 10,
+                      letterSpacing: 1.1,
                     ),
                   ),
                 ),
               ),
-          ],
-        ),
+            ),
+        ],
       ),
     );
 

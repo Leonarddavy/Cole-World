@@ -52,12 +52,22 @@ class GraffitiBackdrop extends StatefulWidget {
     _syncTimer();
   }
 
+  /// The built-in images, which differ per artist edition.
+  static List<String> _defaultSources = defaultShowcaseAssets;
+  static List<String> _customSources = const [];
+
+  static void setDefaultSources(List<String> sources) {
+    _defaultSources = sources.isEmpty ? defaultShowcaseAssets : sources;
+    setCustomSources(_customSources);
+  }
+
   static void setCustomSources(List<String> customSources) {
     final cleaned = customSources
         .map((item) => item.trim())
         .where((item) => item.isNotEmpty)
         .toList();
-    final next = cleaned.isEmpty ? [...defaultShowcaseAssets] : cleaned;
+    _customSources = cleaned;
+    final next = cleaned.isEmpty ? [..._defaultSources] : cleaned;
     if (listEquals(next, _sourcesListenable.value)) {
       return;
     }

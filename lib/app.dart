@@ -1,15 +1,25 @@
 import 'package:flutter/material.dart';
 
+import 'data/artist_editions.dart';
 import 'pages/home_shell.dart';
 import 'pages/splash_catalog_page.dart';
 import 'services/app_prefs.dart';
+import 'services/library_storage.dart';
 import 'theme/app_theme.dart';
+import 'widgets/graffiti_backdrop.dart';
 
 class JColeVaultApp extends StatefulWidget {
-  const JColeVaultApp({super.key, this.prefs = const AppPrefs()});
+  const JColeVaultApp({
+    super.key,
+    this.prefs = const AppPrefs(),
+    this.libraryStorageFor,
+  });
 
-  /// Where "has the intro been seen" is read from (overridable in tests).
+  /// Where settings are read and saved (overridable in tests).
   final AppPrefs prefs;
+
+  /// Opens an artist's saved library; null uses the device's storage.
+  final LibraryStorage Function(String vault)? libraryStorageFor;
 
   @override
   State<JColeVaultApp> createState() => _JColeVaultAppState();
@@ -35,6 +45,7 @@ class _JColeVaultAppState extends State<JColeVaultApp> {
       theme: AppTheme.dark(settings: _themeSettings),
       home: AppRoot(
         prefs: widget.prefs,
+        libraryStorageFor: widget.libraryStorageFor,
         onThemeSettingsChanged: _onThemeSettingsChanged,
         initialThemeSettings: _themeSettings,
       ),
@@ -48,9 +59,11 @@ class AppRoot extends StatefulWidget {
     required this.prefs,
     required this.onThemeSettingsChanged,
     required this.initialThemeSettings,
+    this.libraryStorageFor,
   });
 
   final AppPrefs prefs;
+  final LibraryStorage Function(String vault)? libraryStorageFor;
   final ValueChanged<AppThemeSettings> onThemeSettingsChanged;
   final AppThemeSettings initialThemeSettings;
 
@@ -63,6 +76,9 @@ class _AppRootState extends State<AppRoot> {
   /// first launch, so returning listeners go straight to their music.
   bool? _showIntro;
 
+  /// The saved settings, handed to the shell so it needn't read them again.
+  Map<String, dynamic>? _prefs;
+
   @override
   void initState() {
     super.initState();
@@ -74,7 +90,19 @@ class _AppRootState extends State<AppRoot> {
     if (!mounted) {
       return;
     }
+    // Open straight into the current artist's look, not J. Cole's first.
+    final artist = activeArtistIn(prefs);
+    final cardShape = prefs['cardShape'];
+    widget.onThemeSettingsChanged(
+      themeForVault(
+        artist,
+        vaultsIn(prefs)[artist.name],
+        cardShapeKey: cardShape is String ? cardShape : null,
+      ),
+    );
+    GraffitiBackdrop.setDefaultSources(artistEdition(artist).backdropAssets);
     setState(() {
+      _prefs = prefs;
       // Only a fresh install has no saved settings; people updating from a
       // version without the "intro seen" flag shouldn't see it again.
       _showIntro = prefs['introSeen'] != true && prefs.isEmpty;
@@ -112,6 +140,9 @@ class _AppRootState extends State<AppRoot> {
               key: const ValueKey('home'),
               onThemeSettingsChanged: widget.onThemeSettingsChanged,
               initialThemeSettings: widget.initialThemeSettings,
+              initialPrefs: _prefs,
+              prefs: widget.prefs,
+              libraryStorageFor: widget.libraryStorageFor,
             ),
     );
   }

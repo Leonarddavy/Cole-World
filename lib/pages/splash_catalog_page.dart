@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../data/artist_editions.dart';
 import '../theme/graffiti_surfaces.dart';
 import '../widgets/graffiti_scaffold.dart';
 import '../widgets/graffiti_tag.dart';
@@ -14,6 +15,7 @@ class SplashCatalogPage extends StatefulWidget {
     this.tagLabel = 'Vault Preview',
     this.primaryCtaLabel = 'Enter Vault',
     this.secondaryCtaLabel = 'Skip',
+    this.items = jColeHighlights,
   });
 
   final VoidCallback onFinished;
@@ -22,6 +24,9 @@ class SplashCatalogPage extends StatefulWidget {
   final String primaryCtaLabel;
   final String secondaryCtaLabel;
 
+  /// The artist's highlights shown as swipeable cards.
+  final List<CatalogHighlight> items;
+
   @override
   State<SplashCatalogPage> createState() => _SplashCatalogPageState();
 }
@@ -29,32 +34,7 @@ class SplashCatalogPage extends StatefulWidget {
 class _SplashCatalogPageState extends State<SplashCatalogPage> {
   final PageController _pageController = PageController();
 
-  final List<_CatalogItem> _items = const [
-    _CatalogItem(
-      year: 'Grammy Era',
-      title: 'Best Rap Song Winner',
-      detail:
-          'Recognized at the Grammy Awards for songwriting and lyrical precision.',
-    ),
-    _CatalogItem(
-      year: '2014',
-      title: 'Forest Hills Milestone',
-      detail:
-          '2014 Forest Hills Drive became one of modern rap\'s most defining albums.',
-    ),
-    _CatalogItem(
-      year: 'Dreamville',
-      title: 'Label Architect',
-      detail:
-          'Built Dreamville into a respected roster and collaborative movement.',
-    ),
-    _CatalogItem(
-      year: 'Feature Run',
-      title: 'Elite Guest Verses',
-      detail:
-          'Delivered standout verses across the 2020s with technical consistency.',
-    ),
-  ];
+  List<CatalogHighlight> get _items => widget.items;
 
   Timer? _timer;
   int _index = 0;
@@ -169,7 +149,7 @@ class _SplashCatalogPageState extends State<SplashCatalogPage> {
                               return Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  GraffitiTag(label: item.year),
+                                  GraffitiTag(label: item.tag),
                                   SizedBox(height: titleSpacing),
                                   Text(
                                     item.title,
@@ -233,16 +213,4 @@ class _SplashCatalogPageState extends State<SplashCatalogPage> {
       ),
     );
   }
-}
-
-class _CatalogItem {
-  const _CatalogItem({
-    required this.year,
-    required this.title,
-    required this.detail,
-  });
-
-  final String year;
-  final String title;
-  final String detail;
 }

@@ -8,9 +8,10 @@ import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:just_audio_background/just_audio_background.dart';
 import 'package:path/path.dart' as path;
+import 'package:url_launcher/url_launcher.dart';
 import 'package:audio_session/audio_session.dart';
 
-import '../data/seed_data.dart';
+import '../data/artist_editions.dart';
 import '../models/app_tab.dart';
 import '../models/collection_models.dart';
 import '../models/entry_menu_action.dart';
@@ -20,6 +21,7 @@ import '../models/story_content.dart';
 import '../services/app_prefs.dart';
 import '../services/library_storage.dart';
 import '../services/lyrics_store.dart';
+import '../services/music_video.dart';
 import '../services/online_lyrics.dart';
 import '../services/play_queue.dart';
 import '../services/smart_playlists.dart';
@@ -29,6 +31,7 @@ import '../ui/formatting.dart';
 import '../utils/audio_tags.dart';
 import '../utils/local_fs.dart';
 import '../utils/object_url.dart';
+import '../widgets/artist_edition_tile.dart';
 import '../widgets/graffiti_backdrop.dart';
 import '../widgets/floating_nav_bar.dart';
 import '../widgets/graffiti_scaffold.dart';
@@ -49,10 +52,22 @@ class HomeShell extends StatefulWidget {
     super.key,
     required this.onThemeSettingsChanged,
     required this.initialThemeSettings,
+    this.initialPrefs,
+    this.prefs = const AppPrefs(),
+    this.libraryStorageFor,
   });
 
   final ValueChanged<AppThemeSettings> onThemeSettingsChanged;
   final AppThemeSettings initialThemeSettings;
+
+  /// Where settings are saved (overridable in tests).
+  final AppPrefs prefs;
+
+  /// Opens an artist's saved library; null uses the device's storage.
+  final LibraryStorage Function(String vault)? libraryStorageFor;
+
+  /// Settings already read by the app root, to avoid reading them twice.
+  final Map<String, dynamic>? initialPrefs;
 
   @override
   State<HomeShell> createState() => _HomeShellState();
@@ -62,13 +77,38 @@ enum _SongImportSource { files, folder }
 
 class _HomeShellState extends State<HomeShell> {
   final AudioPlayer _audioPlayer = AudioPlayer();
-  final AppPrefs _prefs = const AppPrefs();
-  final LibraryStorage _libraryStorage = const LibraryStorage();
+  AppPrefs get _prefs => widget.prefs;
+
+  /// Each artist has their own library file.
+  LibraryStorage get _libraryStorage {
+    final vault = _edition.storageKey;
+    return widget.libraryStorageFor?.call(vault) ??
+        LibraryStorage(vault: vault);
+  }
+
+  /// Which artist the app is about; each has a separate vault.
+  ArtistProfile _artist = ArtistProfile.jcole;
+  ArtistEdition get _edition => artistEdition(_artist);
+
+  /// Saved vault data for every artist, refreshed for the active one on save.
+  Map<String, Map<String, dynamic>> _vaults = {};
+  bool _switchingArtist = false;
+
+  /// False until the active artist's library has loaded.
+  bool _libraryReady = false;
   final LyricsStore _lyricsStore = const LyricsStore();
 
   /// Lyrics already looked up this session (null = none found).
   final Map<String, Lyrics?> _lyricsCache = {};
   final LrclibClient _lrclib = LrclibClient();
+  final YoutubeVideoSearch _youtubeSearch = YoutubeVideoSearch();
+
+  /// Music videos matched to songs, by track id.
+  Map<String, MusicVideoLink> _musicVideos = const {};
+  bool _musicVideoConsent = false;
+
+  /// The user's own YouTube Data API key; empty means "paste links".
+  String _youtubeApiKey = '';
 
   /// Opt-in: look songs up on LRCLIB when no local lyrics exist.
   final ValueNotifier<bool> _onlineLyricsListenable = ValueNotifier(false);
@@ -113,7 +153,7 @@ class _HomeShellState extends State<HomeShell> {
   StreamSubscription<void>? _becomingNoisySub;
   bool _resumeAfterInterruption = false;
 
-  late List<CollectionEntry> _entries = seedEntries();
+  List<CollectionEntry> _entries = const [];
   StreamSubscription<PlayerState>? _playerStateSub;
   StreamSubscription<Duration>? _positionSub;
   StreamSubscription<Duration?>? _durationSub;
@@ -575,32 +615,36 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   Future<void> _hydrateLibrary() async {
-    final loaded = await _libraryStorage.load();
+    final storage = _libraryStorage;
+    final loaded = await storage.load();
     if (!mounted) {
       return;
     }
-    if (loaded == null || loaded.isEmpty) {
-      final seeded = await _libraryStorage.save(_entries);
-      if (!seeded) {
-        debugPrint('[hydrateLibrary] Could not initialize the library cache.');
-      }
-      return;
-    }
+    final fresh = loaded == null || loaded.isEmpty;
+    final entries = fresh ? _edition.seedEntries() : loaded;
     setState(() {
-      _entries = loaded;
+      _entries = entries;
+      _libraryReady = true;
     });
+    if (fresh && !await storage.save(entries)) {
+      debugPrint('[hydrateLibrary] Could not initialize the library cache.');
+    }
   }
 
   Future<void> _hydrateAndRestoreSession() async {
-    // Load both in parallel; the session can only be resolved once the
-    // library it points into is available.
-    final sessionFuture = _hydratePrefs();
+    // Settings say which artist's library to load; the session can only be
+    // resolved once that library is available.
+    final (:session, :resave) = await _hydratePrefs();
     await _hydrateLibrary();
-    final session = await sessionFuture;
     if (!mounted) {
       return;
     }
     await _restoreLastSession(session);
+    if (resave && mounted) {
+      // Saved only now so the restored song is kept: saving earlier would
+      // record that nothing was playing.
+      unawaited(_persistPrefs(notifyOnFailure: false));
+    }
   }
 
   /// Loads the track from the previous launch, paused at its saved position.
@@ -664,11 +708,17 @@ class _HomeShellState extends State<HomeShell> {
     unawaited(_persistPrefs(notifyOnFailure: false));
   }
 
-  /// Returns the session saved by the previous launch, if any.
-  Future<_LastSession?> _hydratePrefs() async {
-    final prefs = await _prefs.load();
+  /// Returns the session saved by the previous launch, if any, and whether
+  /// settings need saving again (after a migration or the first launch).
+  Future<({_LastSession? session, bool resave})> _hydratePrefs() async {
+    final initial = widget.initialPrefs;
+    // Always await: applying settings updates the app root, which mustn't
+    // happen while this widget is still being built.
+    final prefs = initial != null
+        ? await Future.value(initial)
+        : await _prefs.load();
     if (!mounted) {
-      return null;
+      return (session: null, resave: false);
     }
     var tabLayout = TabLayout.fromJson(prefs['tabLayout']);
     if (prefs['tabLayout'] == null && prefs['showStoryTab'] == false) {
@@ -677,44 +727,22 @@ class _HomeShellState extends State<HomeShell> {
     }
     final backgroundRotation = prefs['backgroundRotation'] == true;
     final editMode = prefs['editMode'];
-    final customBackdropSources = _parseStringList(
-      prefs['customBackdropSources'],
-    );
-    var themeSettings = _normalizedThemeSettings(
-      AppThemeSettings.fromJson(prefs['themeSettings']),
-    );
     final themeVersion = prefs['themeVersion'];
     final migrateTheme =
         themeVersion is! int || themeVersion < AppThemeSettings.currentVersion;
-    if (migrateTheme && themeSettings.bodyFontKey == 'permanent_marker') {
-      // The old default body font; marker lettering is hard to read in long
-      // lists, so earlier installs move to the new readable default.
-      themeSettings = themeSettings.copyWith(
-        bodyFontKey: AppThemeSettings.defaultBodyFontKey,
-      );
-    }
-    final storyContent = StoryContent.fromJson(prefs['storyContent']);
-    final recentPlays = _parseRecentPlays(prefs['recentPlays']);
-    final lastSession = _LastSession.fromJson(prefs['lastSession']);
-    _savedQueueJson = prefs['queue'];
-    final likedTrackIds = _parseStringList(prefs['likedTrackIds']);
-    final rawCounts = prefs['playCounts'];
-    final playCounts = <String, int>{
-      if (rawCounts is Map)
-        for (final item in rawCounts.entries)
-          if (item.value is num && (item.value as num) > 0)
-            item.key.toString(): (item.value as num).toInt(),
-    };
     final shuffle = prefs['shuffleEnabled'];
     final repeatMode = PlaybackRepeatMode.values.firstWhere(
       (mode) => mode.name == prefs['repeatMode'],
       orElse: () => PlaybackRepeatMode.off,
     );
-    _likedIdsListenable.value = likedTrackIds.toSet();
     _onlineLyricsListenable.value = prefs['onlineLyrics'] == true;
+    _musicVideoConsent = prefs['musicVideoConsent'] == true;
+    final apiKey = prefs['youtubeApiKey'];
+    _youtubeApiKey = apiKey is String ? apiKey.trim() : '';
+    final cardShape = prefs['cardShape'];
+    _artist = activeArtistIn(prefs);
+    _vaults = vaultsIn(prefs);
     setState(() {
-      _likedTrackIds = likedTrackIds;
-      _playCounts = playCounts;
       _shuffleEnabled = shuffle is bool ? shuffle : false;
       _shuffleEnabledListenable.value = _shuffleEnabled;
       _repeatMode = repeatMode;
@@ -722,21 +750,170 @@ class _HomeShellState extends State<HomeShell> {
       _tabLayout = tabLayout;
       _backgroundRotation = backgroundRotation;
       _isEditMode = editMode is bool ? editMode : false;
+      _ensureCurrentTabVisible();
+    });
+    final lastSession = _applyVault(
+      _vaults[_artist.name] ?? const {},
+      cardShapeKey: cardShape is String ? cardShape : null,
+      migrateTheme: migrateTheme,
+    );
+    GraffitiBackdrop.setRotationEnabled(backgroundRotation);
+    _prefsHydrated = true;
+    // Record the migration, that the intro was seen, and the per-artist
+    // layout of settings.
+    final resave =
+        migrateTheme || prefs['introSeen'] != true || prefs['vaults'] == null;
+    return (session: lastSession, resave: resave);
+  }
+
+  /// Loads one artist's vault into the app: theme, story, backgrounds,
+  /// likes, play counts, history and saved videos. Returns its last session.
+  _LastSession? _applyVault(
+    Map<String, dynamic> vault, {
+    String? cardShapeKey,
+    bool migrateTheme = false,
+  }) {
+    final edition = _edition;
+    var themeSettings = _normalizedThemeSettings(
+      themeForVault(_artist, vault, cardShapeKey: cardShapeKey),
+    );
+    if (migrateTheme && themeSettings.bodyFontKey == 'permanent_marker') {
+      // The old default body font; marker lettering is hard to read in long
+      // lists, so earlier installs move to the new readable default.
+      themeSettings = themeSettings.copyWith(
+        bodyFontKey: AppThemeSettings.defaultBodyFontKey,
+      );
+    }
+    final customBackdropSources = _parseStringList(
+      vault['customBackdropSources'],
+    );
+    final storyContent = StoryContent.fromJson(
+      vault['storyContent'],
+      fallback: edition.story,
+    );
+    final recentPlays = _parseRecentPlays(vault['recentPlays']);
+    final lastSession = _LastSession.fromJson(vault['lastSession']);
+    _savedQueueJson = vault['queue'];
+    final likedTrackIds = _parseStringList(vault['likedTrackIds']);
+    final rawCounts = vault['playCounts'];
+    final playCounts = <String, int>{
+      if (rawCounts is Map)
+        for (final item in rawCounts.entries)
+          if (item.value is num && (item.value as num) > 0)
+            item.key.toString(): (item.value as num).toInt(),
+    };
+    final rawVideos = vault['musicVideos'];
+    _musicVideos = {
+      if (rawVideos is Map)
+        for (final item in rawVideos.entries)
+          item.key.toString(): ?MusicVideoLink.fromJson(item.value),
+    };
+    _likedIdsListenable.value = likedTrackIds.toSet();
+    setState(() {
+      _likedTrackIds = likedTrackIds;
+      _playCounts = playCounts;
       _customBackdropSources = customBackdropSources;
       _themeSettings = themeSettings;
       _storyContent = storyContent;
       _recentPlays = recentPlays;
-      _ensureCurrentTabVisible();
     });
+    GraffitiBackdrop.setDefaultSources(edition.backdropAssets);
     GraffitiBackdrop.setCustomSources(customBackdropSources);
-    GraffitiBackdrop.setRotationEnabled(backgroundRotation);
     widget.onThemeSettingsChanged(themeSettings);
-    _prefsHydrated = true;
-    if (migrateTheme || prefs['introSeen'] != true) {
-      // Record the migration and that the intro has been seen.
-      unawaited(_persistPrefs(notifyOnFailure: false));
-    }
     return lastSession;
+  }
+
+  /// The active artist's vault, as it should be saved.
+  Map<String, dynamic> _vaultSnapshot() {
+    final entryId = _currentEntryId;
+    final track = _currentTrack;
+    return {
+      'lastSession': entryId == null || track == null
+          ? null
+          : _LastSession(
+              entryId: entryId,
+              trackId: track.id,
+              position: _position,
+            ).toJson(),
+      'queue': _queueListenable.value.current == null
+          ? null
+          : queueToJson(_queueListenable.value),
+      'likedTrackIds': [..._likedTrackIds],
+      'musicVideos': {
+        for (final item in _musicVideos.entries) item.key: item.value.toJson(),
+      },
+      'playCounts': {..._playCounts},
+      'customBackdropSources': [..._customBackdropSources],
+      'themeSettings': _themeSettings.toJson(),
+      'storyContent': _storyContent.toJson(),
+      'recentPlays': _recentPlays.map((item) => item.toJson()).toList(),
+    };
+  }
+
+  /// Switches the whole app to another artist's vault. Playback stops; the
+  /// other artist's last song comes back paused where it was left.
+  Future<void> _switchArtist(ArtistProfile next) async {
+    if (next == _artist || _switchingArtist) {
+      return;
+    }
+    // Remember exactly where this artist was, before stopping playback.
+    _vaults[_artist.name] = _vaultSnapshot();
+    final cardShape = _themeSettings.cardShapeKey;
+    _switchingArtist = true;
+    try {
+      try {
+        await _audioPlayer.stop();
+      } catch (error, stackTrace) {
+        _logError('switchArtist.stop', error, stackTrace);
+      }
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _currentTrack = null;
+        _currentEntryId = null;
+        _currentTrackListenable.value = null;
+        _isPlaying = false;
+        _shuffleQueueEntryId = null;
+        _shuffleQueue = [];
+        _artist = next;
+        _entries = const [];
+        _libraryReady = false;
+        _previousTab = _currentTab;
+        _currentTab = AppTab.home;
+        _ensureCurrentTabVisible();
+      });
+      _queueListenable.value = PlayQueueView.empty;
+      _resetPlaybackProgress();
+      _pendingTrackIdListenable.value = null;
+      final session = _applyVault(
+        _vaults[next.name] ?? const {},
+        cardShapeKey: cardShape,
+      );
+      await _hydrateLibrary();
+      if (!mounted) {
+        return;
+      }
+      await _restoreLastSession(session);
+    } finally {
+      _switchingArtist = false;
+    }
+    if (!mounted) {
+      return;
+    }
+    unawaited(_persistPrefs(notifyOnFailure: false));
+    _showMessage('Switched to ${_edition.name}.');
+  }
+
+  Future<void> _showArtistPicker() async {
+    final picked = await showModalBottomSheet<ArtistProfile>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => _ArtistPickerSheet(current: _artist),
+    );
+    if (picked != null && mounted) {
+      await _switchArtist(picked);
+    }
   }
 
   List<_RecentPlayPointer> _parseRecentPlays(Object? raw) {
@@ -785,6 +962,11 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   Future<void> _persistLibrary() async {
+    if (!_libraryReady) {
+      // Mid-switch the active artist's library hasn't loaded yet; saving now
+      // would overwrite it with nothing.
+      return;
+    }
     final success = await _libraryStorage.save(_entries);
     if (!success) {
       _showMessage('Could not save library changes.');
@@ -792,37 +974,28 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   Future<void> _persistPrefs({bool notifyOnFailure = true}) async {
-    if (!_prefsHydrated) {
+    // Mid-switch the state is part one artist, part the other; the switch
+    // saves once it's done.
+    if (!_prefsHydrated || _switchingArtist) {
       return;
     }
-    final entryId = _currentEntryId;
-    final track = _currentTrack;
+    _vaults[_artist.name] = _vaultSnapshot();
     final snapshot = <String, dynamic>{
-      'lastSession': entryId == null || track == null
-          ? null
-          : _LastSession(
-              entryId: entryId,
-              trackId: track.id,
-              position: _position,
-            ).toJson(),
+      'activeArtist': _artist.name,
+      'vaults': {for (final item in _vaults.entries) item.key: item.value},
       'shuffleEnabled': _shuffleEnabled,
       'repeatMode': _repeatMode.name,
-      'queue': _queueListenable.value.current == null
-          ? null
-          : queueToJson(_queueListenable.value),
-      'likedTrackIds': _likedTrackIds,
       'onlineLyrics': _onlineLyricsListenable.value,
-      'playCounts': _playCounts,
+      'musicVideoConsent': _musicVideoConsent,
+      'youtubeApiKey': _youtubeApiKey,
+      // Card shape is one choice for every artist.
+      'cardShape': _themeSettings.cardShapeKey,
       'tabLayout': _tabLayout.toJson(),
       'backgroundRotation': _backgroundRotation,
       'themeVersion': AppThemeSettings.currentVersion,
       // The shell only runs once the intro has been shown or skipped.
       'introSeen': true,
       'editMode': _isEditMode,
-      'customBackdropSources': _customBackdropSources,
-      'themeSettings': _themeSettings.toJson(),
-      'storyContent': _storyContent.toJson(),
-      'recentPlays': _recentPlays.map((item) => item.toJson()).toList(),
     };
     // Serialize writes so an older snapshot can never land after a newer one.
     final write = _prefsWriteChain.then((_) => _prefs.save(snapshot));
@@ -936,7 +1109,11 @@ class _HomeShellState extends State<HomeShell> {
     final next = await showDialog<AppThemeSettings>(
       context: context,
       builder: (context) {
-        return _ThemeEditorDialog(initialSettings: _themeSettings);
+        return _ThemeEditorDialog(
+          initialSettings: _themeSettings,
+          artistLook: _edition.theme,
+          artistName: _edition.name,
+        );
       },
     );
     if (!mounted || next == null) {
@@ -1087,7 +1264,10 @@ class _HomeShellState extends State<HomeShell> {
     final next = await showDialog<StoryContent>(
       context: context,
       builder: (context) {
-        return _StoryEditorDialog(initialContent: _storyContent);
+        return _StoryEditorDialog(
+          initialContent: _storyContent,
+          defaults: _edition.story,
+        );
       },
     );
     if (!mounted || next == null) {
@@ -1518,6 +1698,18 @@ class _HomeShellState extends State<HomeShell> {
           onRescanSongInfo: _rescanSongInfo,
           onImportMusic: _importMusic,
           onReplayIntro: _replayIntro,
+          youtubeApiKeySet: _youtubeApiKey.isNotEmpty,
+          onEditYoutubeApiKey: _editYoutubeApiKey,
+          artist: _artist,
+          onArtistChanged: (artist) async {
+            // Back to Home, then switch, so the new artist is front and centre.
+            Navigator.of(context).popUntil((route) => route.isFirst);
+            await _switchArtist(artist);
+          },
+          cardShape: _themeSettings.cardShape,
+          onCardShapeChanged: (style) => _applyThemeSettings(
+            _themeSettings.copyWith(cardShapeKey: style.name),
+          ),
         ),
       ),
     );
@@ -1528,7 +1720,8 @@ class _HomeShellState extends State<HomeShell> {
       MaterialPageRoute<void>(
         builder: (routeContext) => SplashCatalogPage(
           autoAdvance: false,
-          tagLabel: 'Intro',
+          tagLabel: '${_edition.name} Intro',
+          items: _edition.highlights,
           secondaryCtaLabel: 'Close',
           primaryCtaLabel: 'Back To Vault',
           onFinished: () => Navigator.of(routeContext).maybePop(),
@@ -1845,12 +2038,158 @@ class _HomeShellState extends State<HomeShell> {
   /// Deletes stored lyrics for tracks that no longer exist anywhere.
   void _forgetLyricsOfDeletedTracks(Iterable<Track> removed) {
     final alive = tracksById(_entries);
+    var videosChanged = false;
     for (final track in removed) {
       if (!alive.containsKey(track.id)) {
         _lyricsCache.remove(track.id);
         unawaited(_lyricsStore.delete(track.id));
+        if (_musicVideos.containsKey(track.id)) {
+          _musicVideos = {..._musicVideos}..remove(track.id);
+          videosChanged = true;
+        }
       }
     }
+    if (videosChanged) {
+      unawaited(_persistPrefs(notifyOnFailure: false));
+    }
+  }
+
+  // --- music videos ----------------------------------------------------------
+
+  Future<void> _saveMusicVideo(Track track, MusicVideoLink? link) async {
+    final next = {..._musicVideos};
+    if (link == null) {
+      next.remove(track.id);
+    } else {
+      next[track.id] = link;
+    }
+    _musicVideos = next;
+    await _persistPrefs(notifyOnFailure: false);
+  }
+
+  /// Explains, once, how videos work before the first one plays.
+  Future<bool> _ensureMusicVideoConsent() async {
+    if (_musicVideoConsent) {
+      return true;
+    }
+    final agreed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Watch music videos?'),
+        content: const Text(
+          'Music videos stream from YouTube and play with their own sound. '
+          'Your song pauses while a video is open, then picks up from the '
+          'same moment when you close it, leave the lyrics or switch apps.'
+          '\n\nFinding a video sends the song\'s title and artist to '
+          'YouTube. By watching, you agree to YouTube\'s Terms of Service.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () =>
+                _openExternalUrl(Uri.https('www.youtube.com', '/t/terms')),
+            child: const Text('YouTube terms'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Not now'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Continue'),
+          ),
+        ],
+      ),
+    );
+    if (agreed != true || !mounted) {
+      return false;
+    }
+    _musicVideoConsent = true;
+    unawaited(_persistPrefs(notifyOnFailure: false));
+    return true;
+  }
+
+  Future<List<MusicVideoCandidate>> _searchMusicVideos(Track track) {
+    return _youtubeSearch.search(
+      apiKey: _youtubeApiKey,
+      title: track.title,
+      artist: track.artist,
+    );
+  }
+
+  Future<bool> _openExternalUrl(Uri uri) async {
+    try {
+      return await launchUrl(uri, mode: LaunchMode.externalApplication);
+    } catch (error, stackTrace) {
+      _logError('openExternalUrl', error, stackTrace);
+      return false;
+    }
+  }
+
+  /// Resolves to whether the song was playing.
+  Future<bool> _pauseSongForVideo() async {
+    final wasPlaying = _audioPlayer.playing;
+    if (wasPlaying) {
+      try {
+        await _audioPlayer.pause();
+      } catch (error, stackTrace) {
+        _logError('pauseSongForVideo', error, stackTrace);
+      }
+    }
+    return wasPlaying;
+  }
+
+  /// Picks the song back up where the video left off.
+  Future<void> _resumeSongAfterVideo(
+    Duration position, {
+    required bool play,
+  }) async {
+    if (_currentTrack == null) {
+      return;
+    }
+    try {
+      final length = _durationListenable.value;
+      if (length > Duration.zero &&
+          position >= length - const Duration(seconds: 1)) {
+        // Video outros often run past the end of the song: move on.
+        if (play) {
+          await _playNextInEntry();
+        } else {
+          await _seekTo(length - const Duration(seconds: 1));
+        }
+      } else {
+        await _seekTo(position);
+      }
+      if (play && !_audioPlayer.playing) {
+        await _audioSession?.setActive(true);
+        await _audioPlayer.play();
+      }
+    } catch (error, stackTrace) {
+      _logError('resumeSongAfterVideo', error, stackTrace);
+    }
+  }
+
+  /// Resolves to whether a key is set afterwards.
+  Future<bool> _editYoutubeApiKey() async {
+    final result = await showDialog<String>(
+      context: context,
+      builder: (context) => _YoutubeApiKeyDialog(
+        initialValue: _youtubeApiKey,
+        onOpenHelp: () => _openExternalUrl(
+          Uri.https('developers.google.com', '/youtube/v3/getting-started'),
+        ),
+      ),
+    );
+    if (result == null || !mounted) {
+      return _youtubeApiKey.isNotEmpty;
+    }
+    setState(() => _youtubeApiKey = result.trim());
+    unawaited(_persistPrefs(notifyOnFailure: false));
+    _showMessage(
+      _youtubeApiKey.isEmpty
+          ? 'YouTube API key removed.'
+          : 'YouTube API key saved. Videos can now be found automatically.',
+    );
+    return _youtubeApiKey.isNotEmpty;
   }
 
   Future<void> _openLyrics() async {
@@ -1866,6 +2205,18 @@ class _HomeShellState extends State<HomeShell> {
           onRemoveLyrics: _removeLyricsFor,
           onlineLyricsListenable: _onlineLyricsListenable,
           onEnableOnlineLyrics: _enableOnlineLyrics,
+          musicVideos: MusicVideoSupport(
+            linkFor: (track) => _musicVideos[track.id],
+            saveLink: _saveMusicVideo,
+            ensureConsent: _ensureMusicVideoConsent,
+            canSearch: () => _youtubeApiKey.isNotEmpty,
+            search: _searchMusicVideos,
+            openExternal: _openExternalUrl,
+            pauseSong: _pauseSongForVideo,
+            resumeSong: _resumeSongAfterVideo,
+            songPosition: () => _position,
+            songPlayingStream: _audioPlayer.playingStream,
+          ),
         ),
       ),
     );
@@ -2506,7 +2857,7 @@ class _HomeShellState extends State<HomeShell> {
       return null;
     }
 
-    final tracks = await _tracksFromFiles(files, artist: 'J. Cole');
+    final tracks = await _tracksFromFiles(files, artist: _edition.name);
     if (tracks.isEmpty) {
       _showMessage('No valid audio files selected.');
       return null;
@@ -2675,7 +3026,7 @@ class _HomeShellState extends State<HomeShell> {
 
     final tracks = await _tracksFromFiles(
       draft.selectedSongs,
-      artist: 'J. Cole',
+      artist: _edition.name,
     );
     final thumbnailPath = draft.thumbnailDataBase64 == null
         ? await _persistThumbnailPath(draft.thumbnailPath)
@@ -2949,7 +3300,7 @@ class _HomeShellState extends State<HomeShell> {
       return;
     }
     _showMessage('Importing ${songCount(files.length)}…');
-    final tracks = await _tracksFromFiles(files, artist: 'J. Cole');
+    final tracks = await _tracksFromFiles(files, artist: _edition.name);
     if (!mounted) {
       return;
     }
@@ -3070,6 +3421,8 @@ class _HomeShellState extends State<HomeShell> {
       onOpenNowPlaying: _openNowPlaying,
       onSeeAll: _showCollectionType,
       onImportMusic: _importMusic,
+      artist: _edition,
+      onSwitchArtist: _showArtistPicker,
     );
   }
 
@@ -3104,8 +3457,10 @@ class _HomeShellState extends State<HomeShell> {
         );
       },
       child: KeyedSubtree(
-        key: ValueKey(currentTab),
-        child: _buildTabPage(currentTab),
+        key: ValueKey('${_artist.name}_${currentTab.name}'),
+        child: _libraryReady
+            ? _buildTabPage(currentTab)
+            : const Center(child: CircularProgressIndicator()),
       ),
     );
 
@@ -3970,9 +4325,17 @@ class _CreateCollectionDialogState extends State<_CreateCollectionDialog> {
 }
 
 class _ThemeEditorDialog extends StatefulWidget {
-  const _ThemeEditorDialog({required this.initialSettings});
+  const _ThemeEditorDialog({
+    required this.initialSettings,
+    required this.artistLook,
+    required this.artistName,
+  });
 
   final AppThemeSettings initialSettings;
+
+  /// The current artist's own look, which "Reset" goes back to.
+  final AppThemeSettings artistLook;
+  final String artistName;
 
   @override
   State<_ThemeEditorDialog> createState() => _ThemeEditorDialogState();
@@ -3986,6 +4349,10 @@ class _ThemeEditorDialogState extends State<_ThemeEditorDialog> {
     _ColorOption(label: 'Rose', value: 0xFFFF6B6B),
     _ColorOption(label: 'Lime', value: 0xFFB4FF5C),
     _ColorOption(label: 'Purple', value: 0xFFB084FF),
+    _ColorOption(label: 'Crimson', value: 0xFFE5383B),
+    _ColorOption(label: 'Bone', value: 0xFFF1E9DA),
+    _ColorOption(label: 'Ice', value: 0xFF8EC9FF),
+    _ColorOption(label: 'OVO Gold', value: 0xFFD4AF37),
   ];
 
   static const List<_ColorOption> _backgroundColors = [
@@ -3995,6 +4362,7 @@ class _ThemeEditorDialogState extends State<_ThemeEditorDialog> {
     _ColorOption(label: 'Graphite', value: 0xFF111111),
     _ColorOption(label: 'Midnight', value: 0xFF0B1220),
     _ColorOption(label: 'Olive', value: 0xFF13160F),
+    _ColorOption(label: 'Charcoal', value: 0xFF0E0E10),
   ];
 
   late String _displayFontKey;
@@ -4044,10 +4412,22 @@ class _ThemeEditorDialogState extends State<_ThemeEditorDialog> {
     );
   }
 
+  void _resetToArtistLook() {
+    final look = widget.artistLook;
+    setState(() {
+      _displayFontKey = look.displayFontKey;
+      _bodyFontKey = look.bodyFontKey;
+      _primaryColorValue = look.primaryColorValue;
+      _secondaryColorValue = look.secondaryColorValue;
+      _backgroundColorValue = look.backgroundColorValue;
+    });
+  }
+
   void _submit() {
+    // copyWith keeps settings this dialog doesn't edit (e.g. card shape).
     Navigator.pop(
       context,
-      AppThemeSettings(
+      widget.initialSettings.copyWith(
         primaryColorValue: _primaryColorValue,
         secondaryColorValue: _secondaryColorValue,
         backgroundColorValue: _backgroundColorValue,
@@ -4069,6 +4449,8 @@ class _ThemeEditorDialogState extends State<_ThemeEditorDialog> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               DropdownButtonFormField<String>(
+                // Keyed by value so "Reset" shows the restored font.
+                key: ValueKey('display-$_displayFontKey'),
                 initialValue: _displayFontKey,
                 decoration: const InputDecoration(labelText: 'Display font'),
                 items: [
@@ -4089,6 +4471,7 @@ class _ThemeEditorDialogState extends State<_ThemeEditorDialog> {
               ),
               const SizedBox(height: 12),
               DropdownButtonFormField<String>(
+                key: ValueKey('body-$_bodyFontKey'),
                 initialValue: _bodyFontKey,
                 decoration: const InputDecoration(labelText: 'Body font'),
                 items: [
@@ -4145,6 +4528,13 @@ class _ThemeEditorDialogState extends State<_ThemeEditorDialog> {
         ),
       ),
       actions: [
+        Tooltip(
+          message: "Back to ${widget.artistName}'s look",
+          child: TextButton(
+            onPressed: _resetToArtistLook,
+            child: const Text('Reset'),
+          ),
+        ),
         TextButton(
           onPressed: () => Navigator.pop(context),
           child: const Text('Cancel'),
@@ -4156,9 +4546,15 @@ class _ThemeEditorDialogState extends State<_ThemeEditorDialog> {
 }
 
 class _StoryEditorDialog extends StatefulWidget {
-  const _StoryEditorDialog({required this.initialContent});
+  const _StoryEditorDialog({
+    required this.initialContent,
+    required this.defaults,
+  });
 
   final StoryContent initialContent;
+
+  /// What "Reset Defaults" goes back to: the current artist's story.
+  final StoryContent defaults;
 
   @override
   State<_StoryEditorDialog> createState() => _StoryEditorDialogState();
@@ -4228,7 +4624,7 @@ class _StoryEditorDialogState extends State<_StoryEditorDialog> {
   }
 
   void _resetDefaults() {
-    final defaults = StoryContent.defaults();
+    final defaults = widget.defaults;
     // The old controllers are still attached to TextFields until the next
     // frame rebuilds with the new drafts, so dispose them after that frame.
     final staleDrafts = _sectionDrafts;
@@ -4489,6 +4885,143 @@ class _NamePromptDialogState extends State<_NamePromptDialog> {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// Enter, replace or remove the YouTube Data API key used to find videos.
+class _YoutubeApiKeyDialog extends StatefulWidget {
+  const _YoutubeApiKeyDialog({
+    required this.initialValue,
+    required this.onOpenHelp,
+  });
+
+  final String initialValue;
+  final VoidCallback onOpenHelp;
+
+  @override
+  State<_YoutubeApiKeyDialog> createState() => _YoutubeApiKeyDialogState();
+}
+
+class _YoutubeApiKeyDialogState extends State<_YoutubeApiKeyDialog> {
+  /// Google API keys are "AIza" followed by 35 more characters.
+  static final RegExp _keyPattern = RegExp(r'^AIza[0-9A-Za-z_-]{35}$');
+
+  late final TextEditingController _controller = TextEditingController(
+    text: widget.initialValue,
+  );
+  String? _error;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _save() {
+    final key = _controller.text.trim();
+    if (key.isNotEmpty && !_keyPattern.hasMatch(key)) {
+      setState(() {
+        _error =
+            "That doesn't look like a YouTube API key (they start "
+            'with "AIza").';
+      });
+      return;
+    }
+    Navigator.pop(context, key);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return AlertDialog(
+      title: const Text('YouTube API key'),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'With your own free key, II.VI finds music videos for you. '
+              'Without one, you can still paste YouTube links.\n\n'
+              'Create a project in Google Cloud Console, turn on '
+              '"YouTube Data API v3" and create an API key. Each search uses '
+              '100 of the 10,000 free daily units — about 100 searches a day.',
+              style: theme.textTheme.bodyMedium,
+            ),
+            TextButton.icon(
+              onPressed: widget.onOpenHelp,
+              icon: const Icon(Icons.open_in_new),
+              label: const Text('How to get a key'),
+            ),
+            TextField(
+              controller: _controller,
+              autocorrect: false,
+              enableSuggestions: false,
+              decoration: InputDecoration(
+                labelText: 'API key',
+                hintText: 'AIza…',
+                errorText: _error,
+              ),
+              onChanged: (_) {
+                if (_error != null) {
+                  setState(() => _error = null);
+                }
+              },
+              onSubmitted: (_) => _save(),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        if (widget.initialValue.isNotEmpty)
+          TextButton(
+            onPressed: () => Navigator.pop(context, ''),
+            child: const Text('Remove'),
+          ),
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(onPressed: _save, child: const Text('Save')),
+      ],
+    );
+  }
+}
+
+/// Lists the artist editions, each with a swatch of its theme.
+class _ArtistPickerSheet extends StatelessWidget {
+  const _ArtistPickerSheet({required this.current});
+
+  final ArtistProfile current;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return SafeArea(
+      child: ListView(
+        shrinkWrap: true,
+        padding: const EdgeInsets.only(bottom: 12),
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+            child: Text('Switch artist', style: theme.textTheme.titleLarge),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: Text(
+              'Each artist has their own library, story, theme and history.',
+              style: theme.textTheme.bodySmall,
+            ),
+          ),
+          for (final profile in ArtistProfile.values)
+            ArtistEditionTile(
+              edition: artistEdition(profile),
+              selected: profile == current,
+              onTap: () => Navigator.pop(context, profile),
+            ),
+        ],
+      ),
     );
   }
 }

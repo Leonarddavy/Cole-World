@@ -41,6 +41,8 @@ void _registerBundledFontLicenses() {
     for (final (family, file) in const [
       ('Rubik Wet Paint', 'OFL-RubikWetPaint.txt'),
       ('Nunito Sans', 'OFL-NunitoSans.txt'),
+      ('Oswald', 'OFL-Oswald.txt'),
+      ('Teko', 'OFL-Teko.txt'),
     ]) {
       final license = await rootBundle.loadString('assets/google_fonts/$file');
       yield LicenseEntryWithLineBreaks([family], license);

@@ -301,12 +301,14 @@ class StoryContent {
     };
   }
 
-  static StoryContent fromJson(Object? raw) {
+  /// Reads saved story content; anything missing comes from [fallback]
+  /// (the current artist's own story), or J. Cole's by default.
+  static StoryContent fromJson(Object? raw, {StoryContent? fallback}) {
+    final defaultsValue = fallback ?? defaults();
     if (raw is! Map) {
-      return defaults();
+      return defaultsValue;
     }
     final json = Map<String, dynamic>.from(raw);
-    final defaultsValue = defaults();
 
     final sections = (json['sections'] as List? ?? [])
         .whereType<Map>()

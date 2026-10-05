@@ -8,11 +8,15 @@ import 'package:path_provider/path_provider.dart';
 import '../models/collection_models.dart';
 
 class LibraryStorage {
-  const LibraryStorage();
+  /// [vault] names the artist whose library this is; J. Cole's keeps the
+  /// original file name, so existing libraries load unchanged.
+  const LibraryStorage({this.vault = 'jcole'});
+
+  final String vault;
 
   Future<File> _libraryFile() async {
     final directory = await getApplicationDocumentsDirectory();
-    return File(path.join(directory.path, 'jcole_library.json'));
+    return File(path.join(directory.path, '${vault}_library.json'));
   }
 
   Future<List<CollectionEntry>?> load() async {

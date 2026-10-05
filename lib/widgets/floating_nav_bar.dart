@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../theme/card_shapes.dart';
 import '../theme/graffiti_surfaces.dart';
 
 class NavItem {
@@ -168,9 +169,9 @@ class _FloatingNavButton extends StatelessWidget {
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 260),
           curve: Curves.easeOutCubic,
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(22),
-            boxShadow: [
+          decoration: ShapeDecoration(
+            shape: CardShapes.of(context).card(22),
+            shadows: [
               BoxShadow(
                 color: selected
                     ? scheme.primary.withValues(alpha: 0.4)
@@ -183,8 +184,8 @@ class _FloatingNavButton extends StatelessWidget {
           child: Material(
             color: Colors.transparent,
             clipBehavior: Clip.antiAlias,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(22),
+            shape: CardShapes.of(context).card(
+              22,
               side: BorderSide(
                 color: selected
                     ? scheme.onPrimary.withValues(alpha: 0.4)

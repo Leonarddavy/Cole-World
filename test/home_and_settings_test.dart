@@ -1,11 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:jcole_player/data/artist_editions.dart';
 import 'package:jcole_player/models/app_tab.dart';
 import 'package:jcole_player/models/collection_models.dart';
 import 'package:jcole_player/pages/home_page.dart';
 import 'package:jcole_player/pages/library_page.dart';
 import 'package:jcole_player/pages/settings_page.dart';
+import 'package:jcole_player/theme/card_shapes.dart';
 
 const _playable = Track(
   id: 'a',
@@ -46,6 +48,7 @@ void main() {
       List<CollectionEntry>? entries,
       RecentTrackShortcut? nowPlaying,
       DateTime? now,
+      ArtistEdition? artist,
     }) => HomePage(
       entries: entries ?? [_collection('fhd', CollectionType.album)],
       smartPlaylists: const [],
@@ -58,6 +61,8 @@ void main() {
       onOpenNowPlaying: () => calls.add('now playing'),
       onSeeAll: (type) => calls.add('see all ${type.name}'),
       onImportMusic: () => calls.add('import'),
+      artist: artist,
+      onSwitchArtist: artist == null ? null : () => calls.add('switch artist'),
       now: now ?? DateTime(2026, 1, 1, 20),
     );
 
@@ -68,6 +73,19 @@ void main() {
       expect(find.text('Good morning'), findsOneWidget);
       await tester.pumpWidget(_host(home(now: DateTime(2026, 1, 1, 21))));
       expect(find.text('Good evening'), findsOneWidget);
+    });
+
+    testWidgets('says whose vault it is and offers a switch', (tester) async {
+      await tester.pumpWidget(_host(home()));
+      expect(find.textContaining('pgLang'), findsNothing);
+
+      await tester.pumpWidget(
+        _host(home(artist: artistEdition(ArtistProfile.kendrick))),
+      );
+      expect(find.textContaining('Kendrick Lamar'), findsOneWidget);
+      expect(find.textContaining('pgLang · TDE'), findsOneWidget);
+      await tester.tap(find.textContaining('Kendrick Lamar'));
+      expect(calls, ['switch artist']);
     });
 
     testWidgets('leads with importing when nothing can play', (tester) async {
@@ -155,6 +173,15 @@ void main() {
       onRescanSongInfo: () async => calls.add('rescan'),
       onImportMusic: () async => calls.add('import'),
       onReplayIntro: () => calls.add('intro'),
+      youtubeApiKeySet: false,
+      onEditYoutubeApiKey: () async {
+        calls.add('api key');
+        return true;
+      },
+      cardShape: CardShapeStyle.rounded,
+      onCardShapeChanged: (style) => calls.add('shape ${style.name}'),
+      artist: ArtistProfile.jcole,
+      onArtistChanged: (artist) => calls.add('artist ${artist.name}'),
     );
 
     setUp(() {
@@ -218,6 +245,19 @@ void main() {
     testWidgets('marks which tabs sit in the bottom bar', (tester) async {
       await pumpSettings(tester, settings());
       expect(find.text('In the bottom bar'), findsNWidgets(3));
+    });
+
+    testWidgets('lists every artist and switches on tap', (tester) async {
+      await pumpSettings(tester, settings());
+      expect(find.text('ARTIST'), findsOneWidget);
+      for (final profile in ArtistProfile.values) {
+        expect(find.text(artistEdition(profile).name), findsOneWidget);
+      }
+      // The current artist is ticked; tapping it does nothing.
+      expect(find.byIcon(Icons.check_circle_rounded), findsOneWidget);
+      await tester.tap(find.text('J. Cole'));
+      await tester.tap(find.text('Drake'));
+      expect(calls, ['artist drake']);
     });
 
     testWidgets('library and about actions', (tester) async {

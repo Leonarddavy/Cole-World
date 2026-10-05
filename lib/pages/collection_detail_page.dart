@@ -5,6 +5,7 @@ import 'package:just_audio/just_audio.dart';
 import '../models/collection_models.dart';
 import '../models/entry_menu_action.dart';
 import '../services/play_queue.dart';
+import '../theme/card_shapes.dart';
 import '../ui/collection_type_ui.dart';
 import '../ui/formatting.dart';
 import '../widgets/artwork_card.dart';
@@ -280,9 +281,9 @@ class _CollectionDetailPageState extends State<CollectionDetailPage> {
                 child: SizedBox.square(
                   dimension: coverSize,
                   child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(20),
-                      boxShadow: const [
+                    decoration: ShapeDecoration(
+                      shape: CardShapes.of(context).artwork(20),
+                      shadows: const [
                         BoxShadow(
                           color: Color(0x99000000),
                           blurRadius: 24,
@@ -536,10 +537,9 @@ class _AboutSection extends StatelessWidget {
     }
     return Material(
       color: theme.colorScheme.surfaceContainer.withValues(alpha: 0.85),
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
-        side: BorderSide(color: theme.colorScheme.outlineVariant),
-      ),
+      shape: CardShapes.of(
+        context,
+      ).card(16, side: BorderSide(color: theme.colorScheme.outlineVariant)),
       clipBehavior: Clip.antiAlias,
       child: ExpansionTile(
         title: Text(
@@ -590,9 +590,10 @@ class _EmptySongs extends StatelessWidget {
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: theme.colorScheme.outlineVariant),
+      decoration: ShapeDecoration(
+        shape: CardShapes.of(
+          context,
+        ).card(18, side: BorderSide(color: theme.colorScheme.outlineVariant)),
         color: theme.colorScheme.surfaceContainer.withValues(alpha: 0.6),
       ),
       child: Column(

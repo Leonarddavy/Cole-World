@@ -1,7 +1,11 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import '../data/artist_editions.dart';
 import '../models/app_tab.dart';
+import '../theme/card_shapes.dart';
+import '../theme/graffiti_surfaces.dart';
+import '../widgets/artist_edition_tile.dart';
 import '../widgets/graffiti_scaffold.dart';
 
 /// Every preference in one place (previously spread over the ⋮ menu, some
@@ -24,6 +28,12 @@ class SettingsPage extends StatefulWidget {
     required this.onRescanSongInfo,
     required this.onImportMusic,
     required this.onReplayIntro,
+    required this.youtubeApiKeySet,
+    required this.onEditYoutubeApiKey,
+    required this.cardShape,
+    required this.onCardShapeChanged,
+    required this.artist,
+    required this.onArtistChanged,
   });
 
   final TabLayout tabLayout;
@@ -46,6 +56,20 @@ class SettingsPage extends StatefulWidget {
   final Future<void> Function() onRescanSongInfo;
   final Future<void> Function() onImportMusic;
   final VoidCallback onReplayIntro;
+  final bool youtubeApiKeySet;
+  final CardShapeStyle cardShape;
+
+  /// Applies right away, so the whole app previews the new shape.
+  final ValueChanged<CardShapeStyle> onCardShapeChanged;
+
+  /// Resolves to whether a key is set afterwards.
+  final Future<bool> Function() onEditYoutubeApiKey;
+
+  /// Whose discography, story and theme the app is showing.
+  final ArtistProfile artist;
+
+  /// Switching changes the whole app, so the caller closes Settings first.
+  final ValueChanged<ArtistProfile> onArtistChanged;
 
   @override
   State<SettingsPage> createState() => _SettingsPageState();
@@ -57,6 +81,22 @@ class _SettingsPageState extends State<SettingsPage> {
   late int _customBackgroundCount = widget.customBackgroundCount;
   late bool _onlineLyrics = widget.onlineLyrics;
   late bool _editMode = widget.editMode;
+  late bool _youtubeApiKeySet = widget.youtubeApiKeySet;
+  late CardShapeStyle _cardShape = widget.cardShape;
+
+  Future<void> _pickCardShape() async {
+    final picked = await showModalBottomSheet<CardShapeStyle>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (context) => _CardShapePicker(selected: _cardShape),
+    );
+    if (picked == null || !mounted) {
+      return;
+    }
+    setState(() => _cardShape = picked);
+    widget.onCardShapeChanged(picked);
+  }
 
   void _updateTabs(TabLayout next) {
     setState(() => _tabLayout = next);
@@ -82,12 +122,39 @@ class _SettingsPageState extends State<SettingsPage> {
       body: ListView(
         padding: const EdgeInsets.only(bottom: 32),
         children: [
+          const _SectionTitle('Artist'),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+            child: Text(
+              'Each artist has their own library, story, theme and history.',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+          for (final profile in ArtistProfile.values)
+            ArtistEditionTile(
+              edition: artistEdition(profile),
+              selected: profile == widget.artist,
+              onTap: profile == widget.artist
+                  ? null
+                  : () => widget.onArtistChanged(profile),
+            ),
           const _SectionTitle('Appearance'),
           ListTile(
             leading: const Icon(Icons.palette_outlined),
             title: const Text('Fonts & colors'),
             subtitle: const Text('Accent colors, background tone and fonts'),
             onTap: widget.onOpenThemeEditor,
+          ),
+          ListTile(
+            leading: const Icon(Icons.crop_square_rounded),
+            title: const Text('Card shape'),
+            subtitle: Text(
+              '${_cardShape.label}: ${_cardShape.description.toLowerCase()}',
+            ),
+            trailing: _ShapeSwatch(style: _cardShape),
+            onTap: _pickCardShape,
           ),
           ListTile(
             leading: const Icon(Icons.wallpaper_outlined),
@@ -192,6 +259,22 @@ class _SettingsPageState extends State<SettingsPage> {
               }
             },
           ),
+          const _SectionTitle('Music videos'),
+          ListTile(
+            leading: const Icon(Icons.smart_display_outlined),
+            title: const Text('YouTube API key'),
+            subtitle: Text(
+              _youtubeApiKeySet
+                  ? 'Set: music videos are found automatically'
+                  : 'Not set: paste YouTube links on the lyrics screen instead',
+            ),
+            onTap: () async {
+              final set = await widget.onEditYoutubeApiKey();
+              if (mounted) {
+                setState(() => _youtubeApiKeySet = set);
+              }
+            },
+          ),
           const _SectionTitle('Library'),
           ListTile(
             leading: const Icon(Icons.download_rounded),
@@ -258,6 +341,80 @@ class _SectionTitle extends StatelessWidget {
             letterSpacing: 1.4,
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// A small cover-and-card preview of a [CardShapeStyle].
+class _ShapeSwatch extends StatelessWidget {
+  const _ShapeSwatch({required this.style});
+
+  final CardShapeStyle style;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final shapes = CardShapes(style);
+    return SizedBox(
+      width: 92,
+      height: 40,
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.end,
+        children: [
+          SizedBox.square(
+            dimension: 36,
+            child: DecoratedBox(
+              decoration: ShapeDecoration(
+                shape: shapes.artwork(8),
+                gradient: scheme.accentGradient,
+              ),
+            ),
+          ),
+          const SizedBox(width: 6),
+          SizedBox(
+            width: 48,
+            height: 26,
+            child: DecoratedBox(
+              decoration: ShapeDecoration(
+                shape: shapes.card(10, side: BorderSide(color: scheme.outline)),
+                gradient: scheme.cardGradient,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _CardShapePicker extends StatelessWidget {
+  const _CardShapePicker({required this.selected});
+
+  final CardShapeStyle selected;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return SafeArea(
+      child: ListView(
+        shrinkWrap: true,
+        padding: const EdgeInsets.only(bottom: 12),
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: Text('Card shape', style: theme.textTheme.titleLarge),
+          ),
+          for (final style in CardShapeStyle.values)
+            ListTile(
+              selected: style == selected,
+              leading: _ShapeSwatch(style: style),
+              title: Text(style.label),
+              subtitle: Text(style.description),
+              trailing: style == selected ? const Icon(Icons.check) : null,
+              onTap: () => Navigator.pop(context, style),
+            ),
+        ],
       ),
     );
   }

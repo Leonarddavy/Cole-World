@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
 
+import '../data/artist_editions.dart';
 import '../models/collection_models.dart';
 import '../services/smart_playlists.dart' show likedSongsEntryId;
+import '../theme/card_shapes.dart';
 import '../theme/graffiti_surfaces.dart';
 import '../ui/collection_type_ui.dart';
 import '../ui/formatting.dart';
+import '../widgets/artist_edition_tile.dart';
 import '../widgets/artwork_card.dart';
 import '../widgets/now_playing_equalizer.dart';
 import 'library_page.dart' show RecentTrackShortcut;
@@ -25,6 +28,8 @@ class HomePage extends StatelessWidget {
     required this.onOpenNowPlaying,
     required this.onSeeAll,
     required this.onImportMusic,
+    this.artist,
+    this.onSwitchArtist,
     this.now,
   });
 
@@ -44,6 +49,11 @@ class HomePage extends StatelessWidget {
   final VoidCallback onOpenNowPlaying;
   final ValueChanged<CollectionType> onSeeAll;
   final VoidCallback onImportMusic;
+
+  /// The artist the app is showing; with [onSwitchArtist], a switch sits
+  /// under the greeting.
+  final ArtistEdition? artist;
+  final VoidCallback? onSwitchArtist;
 
   /// For tests; defaults to the current time.
   final DateTime? now;
@@ -99,6 +109,10 @@ class HomePage extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(16, 4, 16, 32),
       children: [
         Text(_greeting(), style: theme.textTheme.headlineMedium),
+        if ((artist, onSwitchArtist) case (final artist?, final onSwitch?)) ...[
+          const SizedBox(height: 10),
+          _ArtistSwitch(edition: artist, onTap: onSwitch),
+        ],
         const SizedBox(height: 16),
         if (!hasPlayableMusic) ...[
           _ImportMusicCard(onImport: onImportMusic),
@@ -156,6 +170,72 @@ class HomePage extends StatelessWidget {
   }
 }
 
+/// Shows whose vault this is; tapping offers the other artists.
+class _ArtistSwitch extends StatelessWidget {
+  const _ArtistSwitch({required this.edition, required this.onTap});
+
+  final ArtistEdition edition;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Align(
+      alignment: AlignmentDirectional.centerStart,
+      child: Semantics(
+        button: true,
+        label: 'Artist: ${edition.name}. Switch artist',
+        excludeSemantics: true,
+        child: Material(
+          color: scheme.surfaceContainerHigh,
+          shape: const StadiumBorder(),
+          clipBehavior: Clip.antiAlias,
+          child: InkWell(
+            onTap: onTap,
+            child: Padding(
+              padding: const EdgeInsetsDirectional.fromSTEB(5, 5, 12, 5),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  ArtistSwatch(edition: edition, size: 30),
+                  const SizedBox(width: 10),
+                  Flexible(
+                    child: Text.rich(
+                      TextSpan(
+                        children: [
+                          TextSpan(
+                            text: edition.name,
+                            style: theme.textTheme.titleSmall,
+                          ),
+                          TextSpan(
+                            text: '  ${edition.labelLine}',
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: scheme.onSurfaceVariant,
+                            ),
+                          ),
+                        ],
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  Icon(
+                    Icons.unfold_more_rounded,
+                    size: 18,
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _SectionHeader extends StatelessWidget {
   const _SectionHeader({required this.title, this.onSeeAll});
 
@@ -190,8 +270,11 @@ class _ImportMusicCard extends StatelessWidget {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     return DecoratedBox(
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(20),
+      decoration: ShapeDecoration(
+        shape: CardShapes.of(context).card(
+          20,
+          side: BorderSide(color: scheme.primary.withValues(alpha: 0.5)),
+        ),
         gradient: LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
@@ -200,7 +283,6 @@ class _ImportMusicCard extends StatelessWidget {
             scheme.surfaceContainer,
           ],
         ),
-        border: Border.all(color: scheme.primary.withValues(alpha: 0.5)),
       ),
       child: Padding(
         padding: const EdgeInsets.all(20),
@@ -251,12 +333,13 @@ class _ContinueListeningCard extends StatelessWidget {
       color: Colors.transparent,
       child: InkWell(
         onTap: onOpen,
-        borderRadius: BorderRadius.circular(18),
+        customBorder: CardShapes.of(context).card(18),
         child: Ink(
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(18),
+          decoration: ShapeDecoration(
+            shape: CardShapes.of(
+              context,
+            ).card(18, side: BorderSide(color: scheme.outlineVariant)),
             gradient: scheme.raisedGradient,
-            border: Border.all(color: scheme.outlineVariant),
           ),
           child: Padding(
             padding: const EdgeInsets.all(12),
@@ -356,7 +439,7 @@ class _QuickPicksGrid extends StatelessWidget {
                 height: tileHeight.clamp(56.0, 96.0),
                 child: Material(
                   color: scheme.surfaceContainerHigh.withValues(alpha: 0.9),
-                  borderRadius: BorderRadius.circular(10),
+                  shape: CardShapes.of(context).card(10),
                   clipBehavior: Clip.antiAlias,
                   child: InkWell(
                     onTap: () => onOpen(entry),
@@ -438,7 +521,7 @@ class _RecentSongsRail extends StatelessWidget {
           return SizedBox(
             width: cover,
             child: InkWell(
-              borderRadius: BorderRadius.circular(12),
+              customBorder: CardShapes.of(context).card(12),
               onTap: () => onPlay(item.track, item.entry),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -498,7 +581,7 @@ class _CollectionRail extends StatelessWidget {
           return SizedBox(
             width: cover,
             child: InkWell(
-              borderRadius: BorderRadius.circular(12),
+              customBorder: CardShapes.of(context).card(12),
               onTap: () => onOpen(entry),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -506,8 +589,8 @@ class _CollectionRail extends StatelessWidget {
                   SizedBox.square(
                     dimension: cover,
                     child: entry.isSmart
-                        ? ClipRRect(
-                            borderRadius: BorderRadius.circular(12),
+                        ? ShapedBox(
+                            shape: CardShapes.of(context).artwork(12),
                             child: _SmartPlaylistIcon(entry: entry),
                           )
                         : ArtworkCard(

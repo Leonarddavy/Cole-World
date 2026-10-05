@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../models/collection_models.dart';
+import '../theme/card_shapes.dart';
 import '../theme/graffiti_surfaces.dart';
 import '../ui/formatting.dart';
 import 'now_playing_equalizer.dart';
@@ -105,10 +106,11 @@ class _SongRowState extends State<SongRow> {
             if (track.duration != null) formatTrackDuration(track.duration!),
           ].join(' · ');
 
+    final shape = CardShapes.of(context).card(14);
     Widget row = Material(
       color: Colors.transparent,
       child: InkWell(
-        borderRadius: BorderRadius.circular(14),
+        customBorder: shape,
         onTap: widget.onTap,
         onLongPress: widget.onShowActions == null
             ? null
@@ -117,12 +119,13 @@ class _SongRowState extends State<SongRow> {
                 widget.onShowActions!();
               },
         child: Ink(
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(14),
-            gradient: scheme.cardGradient,
-            border: Border.all(
-              color: widget.isActive ? scheme.primary : scheme.outlineVariant,
+          decoration: ShapeDecoration(
+            shape: shape.copyWith(
+              side: BorderSide(
+                color: widget.isActive ? scheme.primary : scheme.outlineVariant,
+              ),
             ),
+            gradient: scheme.cardGradient,
           ),
           child: Padding(
             padding: const EdgeInsets.fromLTRB(4, 6, 0, 6),
@@ -183,8 +186,8 @@ class _SongRowState extends State<SongRow> {
         background: Container(
           alignment: Alignment.centerLeft,
           padding: const EdgeInsets.only(left: 18),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(14),
+          decoration: ShapeDecoration(
+            shape: shape,
             color: scheme.primary.withValues(alpha: 0.25),
           ),
           child: Row(

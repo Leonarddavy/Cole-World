@@ -9,6 +9,7 @@ import 'package:just_audio/just_audio.dart';
 import '../models/collection_models.dart';
 import '../models/playback_models.dart';
 import '../services/play_queue.dart';
+import '../theme/card_shapes.dart';
 import '../theme/graffiti_surfaces.dart';
 import '../ui/collection_type_ui.dart';
 import '../ui/formatting.dart';
@@ -554,10 +555,11 @@ class _Cover extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final entry = this.entry;
+    final shape = CardShapes.of(context).artwork(20);
     return DecoratedBox(
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(20),
-        boxShadow: const [
+      decoration: ShapeDecoration(
+        shape: shape,
+        shadows: const [
           BoxShadow(
             color: Color(0x99000000),
             blurRadius: 28,
@@ -567,8 +569,8 @@ class _Cover extends StatelessWidget {
       ),
       child: entry == null
           ? DecoratedBox(
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(20),
+              decoration: ShapeDecoration(
+                shape: shape,
                 gradient: scheme.artworkPlaceholderGradient,
               ),
               child: const Center(child: Icon(Icons.album, size: 72)),
@@ -901,9 +903,9 @@ class _UpNextPeek extends StatelessWidget {
       excludeSemantics: true,
       child: Material(
         color: Colors.black.withValues(alpha: 0.3),
-        borderRadius: BorderRadius.circular(14),
+        shape: CardShapes.of(context).card(14),
+        clipBehavior: Clip.antiAlias,
         child: InkWell(
-          borderRadius: BorderRadius.circular(14),
           onTap: onOpen,
           child: Padding(
             padding: const EdgeInsets.fromLTRB(14, 10, 8, 10),
@@ -1155,13 +1157,15 @@ class _QueueTile extends StatelessWidget {
       color: Colors.transparent,
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(14),
+        customBorder: CardShapes.of(context).card(14),
         child: Ink(
           padding: const EdgeInsets.fromLTRB(12, 8, 4, 8),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(
-              color: isActive ? scheme.primary : scheme.outlineVariant,
+          decoration: ShapeDecoration(
+            shape: CardShapes.of(context).card(
+              14,
+              side: BorderSide(
+                color: isActive ? scheme.primary : scheme.outlineVariant,
+              ),
             ),
             gradient: scheme.cardGradient,
           ),
